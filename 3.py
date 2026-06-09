@@ -205,9 +205,17 @@ def search_address_by_postal_code(postal_code):
 
     try:
         dadata = dadata_module.Dadata(DADATA_TOKEN)
-        return dadata.suggest("address", postal_code, count=10)
+        result = dadata.suggest(
+            "address",
+            "",
+            count=20,
+            locations=[{"postal_code": postal_code}],
+        )
+        print("DADATA RESULT:", result)
+        return result
     except Exception as exc:
-        raise RuntimeError("Не удалось получить адрес по индексу.") from exc
+        print("DADATA ERROR:", repr(exc))
+        raise RuntimeError(f"Не удалось получить адрес по индексу: {exc}") from exc
     finally:
         close = locals().get("dadata") and getattr(dadata, "close", None)
         if close:
@@ -891,7 +899,10 @@ class YuristApp:
             return
 
         if not suggestions:
-            messagebox.showinfo("DaData", "Адрес по индексу не найден.")
+            messagebox.showinfo(
+                "DaData",
+                "DaData не нашла адрес по этому индексу. Можно заполнить адрес вручную.",
+            )
             return
 
         if len(suggestions) == 1:
