@@ -10,6 +10,15 @@ from tkcalendar import DateEntry
 from docxtpl import DocxTemplate
 import pymorphy3
 
+from banks import (
+    BanksDatabaseError,
+    add_bank,
+    delete_bank,
+    get_bank_details,
+    search_banks,
+    update_bank,
+)
+
 FONT = ("Times New Roman", 12)
 BG_OK = "white"
 BG_ERROR = "#ffcccc"
@@ -323,9 +332,30 @@ class YuristApp:
         self.clients = load_clients()
         self.codes_count = count_codes_in_db()
         self.current_code_results = []
+        self.bank_window = None
 
+        self.create_menu()
         self.create_ui()
         self.refresh_clients_list()
+
+    def create_menu(self):
+        menu_bar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        file_menu.add_command(label="Выход", command=self.root.quit)
+        menu_bar.add_cascade(label="Файл", menu=file_menu)
+
+        menu_bar.add_command(label="Банки", command=self.open_banks_window)
+
+        self.root.config(menu=menu_bar)
+
+    def open_banks_window(self):
+        if self.bank_window and self.bank_window.window.winfo_exists():
+            self.bank_window.window.lift()
+            self.bank_window.window.focus_force()
+            return
+
+        self.bank_window = BanksWindow(self.root)
 
     def create_ui(self):
         canvas = tk.Canvas(self.root)
@@ -652,6 +682,408 @@ class YuristApp:
 
         open_folder(client_folder)
         messagebox.showinfo("Готово", "Документы сформированы и папка клиента открыта.")
+
+
+class BanksWindow:
+    SEARCH_PLACEHOLDER = "Поиск банка по названию, ИНН или ОГРН"
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.window = tk.Toplevel(parent)
+        self.window.title("Банки")
+        self.window.geometry("900x600")
+        self.window.minsize(760, 480)
+
+        self.current_results = []
+        self.search_placeholder_active = True
+
+        self.create_ui()
+        self.show_search_placeholder()
+        self.refresh_results()
+
+    def create_ui(self):
+        self.window.columnconfigure(0, weight=1)
+        self.window.rowconfigure(1, weight=1)
+
+        top_frame = ttk.Frame(self.window, padding=(10, 10, 10, 6))
+        top_frame.grid(row=0, column=0, sticky="ew")
+        top_frame.columnconfigure(0, weight=1)
+
+        self.search_var = tk.StringVar()
+        self.search_entry = tk.Entry(
+            top_frame,
+            textvariable=self.search_var,
+            font=("Times New Roman", 14),
+        )
+        self.search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.search_entry.bind("<FocusIn>", self.on_search_focus_in)
+        self.search_entry.bind("<FocusOut>", self.on_search_focus_out)
+        self.search_entry.bind("<KeyRelease>", self.on_search_change)
+
+        tk.Button(
+            top_frame,
+            text="Добавить банк",
+            font=FONT,
+            command=self.open_add_dialog,
+            width=18,
+        ).grid(row=0, column=1, sticky="e")
+
+        list_frame = ttk.Frame(self.window, padding=(10, 0, 10, 10))
+        list_frame.grid(row=1, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        self.banks_tree = ttk.Treeview(
+            list_frame,
+            columns=("bank",),
+            show="headings",
+            selectmode="browse",
+        )
+        self.banks_tree.heading("bank", text="Название банка | ИНН | ОГРН")
+        self.banks_tree.column("bank", width=820, minwidth=500, stretch=True)
+        self.banks_tree.grid(row=0, column=0, sticky="nsew")
+        self.banks_tree.bind("<Double-Button-1>", self.open_details_for_selected)
+        self.banks_tree.bind("<Button-3>", self.show_context_menu)
+        self.banks_tree.bind("<Button-2>", self.show_context_menu)
+
+        scrollbar = ttk.Scrollbar(
+            list_frame,
+            orient="vertical",
+            command=self.banks_tree.yview,
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.banks_tree.configure(yscrollcommand=scrollbar.set)
+
+        self.context_menu = tk.Menu(self.window, tearoff=0)
+        self.context_menu.add_command(
+            label="Изменить",
+            command=self.open_edit_dialog_for_selected,
+        )
+        self.context_menu.add_command(label="Удалить", command=self.remove_selected_bank)
+
+    def show_search_placeholder(self):
+        self.search_placeholder_active = True
+        self.search_var.set(self.SEARCH_PLACEHOLDER)
+        self.search_entry.configure(fg="gray")
+
+    def hide_search_placeholder(self):
+        if self.search_placeholder_active:
+            self.search_placeholder_active = False
+            self.search_var.set("")
+            self.search_entry.configure(fg="black")
+
+    def on_search_focus_in(self, event):
+        self.hide_search_placeholder()
+
+    def on_search_focus_out(self, event):
+        if not self.search_var.get().strip():
+            self.show_search_placeholder()
+
+    def on_search_change(self, event):
+        if not self.search_placeholder_active:
+            self.refresh_results()
+
+    def get_search_query(self):
+        if self.search_placeholder_active:
+            return ""
+
+        return self.search_var.get().strip()
+
+    def refresh_results(self):
+        for item_id in self.banks_tree.get_children():
+            self.banks_tree.delete(item_id)
+
+        try:
+            self.current_results = search_banks(self.get_search_query())
+        except BanksDatabaseError as exc:
+            self.current_results = []
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return
+
+        for bank in self.current_results:
+            self.banks_tree.insert(
+                "",
+                tk.END,
+                iid=str(bank["id"]),
+                values=(self.format_bank_row(bank),),
+            )
+
+    def format_bank_row(self, bank):
+        return " | ".join((
+            bank.get("name", ""),
+            bank.get("inn", ""),
+            bank.get("ogrn", ""),
+        ))
+
+    def get_selected_bank_id(self):
+        selection = self.banks_tree.selection()
+        if not selection:
+            return None
+
+        return int(selection[0])
+
+    def select_row_under_pointer(self, event):
+        row_id = self.banks_tree.identify_row(event.y)
+        if row_id:
+            self.banks_tree.selection_set(row_id)
+            self.banks_tree.focus(row_id)
+            return True
+
+        return False
+
+    def show_context_menu(self, event):
+        if not self.select_row_under_pointer(event):
+            return
+
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+
+    def open_add_dialog(self):
+        BankEditDialog(
+            self.window,
+            title="Добавить банк",
+            on_save=self.add_bank_from_dialog,
+        )
+
+    def open_edit_dialog_for_selected(self):
+        bank_id = self.get_selected_bank_id()
+        if not bank_id:
+            messagebox.showerror("База банков", "Выберите банк для изменения.", parent=self.window)
+            return
+
+        try:
+            bank = get_bank_details(bank_id)
+        except BanksDatabaseError as exc:
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return
+
+        if not bank:
+            messagebox.showerror("База банков", "Банк не найден.", parent=self.window)
+            self.refresh_results()
+            return
+
+        BankEditDialog(
+            self.window,
+            title="Изменить банк",
+            bank=bank,
+            on_save=lambda data: self.update_bank_from_dialog(bank_id, data),
+        )
+
+    def open_details_for_selected(self, event=None):
+        bank_id = self.get_selected_bank_id()
+        if not bank_id:
+            return
+
+        try:
+            bank = get_bank_details(bank_id)
+        except BanksDatabaseError as exc:
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return
+
+        if not bank:
+            messagebox.showerror("База банков", "Банк не найден.", parent=self.window)
+            self.refresh_results()
+            return
+
+        BankDetailsDialog(self.window, bank, on_edit=self.open_edit_dialog_for_selected)
+
+    def add_bank_from_dialog(self, data):
+        try:
+            add_bank(data)
+        except BanksDatabaseError as exc:
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return False
+
+        self.refresh_results()
+        messagebox.showinfo("База банков", "Банк добавлен.", parent=self.window)
+        return True
+
+    def update_bank_from_dialog(self, bank_id, data):
+        try:
+            update_bank(bank_id, data)
+        except BanksDatabaseError as exc:
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return False
+
+        self.refresh_results()
+        tree_id = str(bank_id)
+        if self.banks_tree.exists(tree_id):
+            self.banks_tree.selection_set(tree_id)
+            self.banks_tree.focus(tree_id)
+        messagebox.showinfo("База банков", "Изменения банка сохранены.", parent=self.window)
+        return True
+
+    def remove_selected_bank(self):
+        bank_id = self.get_selected_bank_id()
+        if not bank_id:
+            messagebox.showerror("База банков", "Выберите банк для удаления.", parent=self.window)
+            return
+
+        bank_name = self.banks_tree.item(str(bank_id), "values")[0].split(" | ", 1)[0]
+        if not messagebox.askyesno(
+            "Удаление банка",
+            f"Удалить банк «{bank_name}» из базы данных?",
+            parent=self.window,
+        ):
+            return
+
+        try:
+            delete_bank(bank_id)
+        except BanksDatabaseError as exc:
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return
+
+        self.refresh_results()
+        messagebox.showinfo("База банков", "Банк удалён.", parent=self.window)
+
+
+class BankEditDialog:
+    def __init__(self, parent, title, on_save, bank=None):
+        self.parent = parent
+        self.on_save = on_save
+        self.bank = bank or {}
+        self.fields = {}
+
+        self.window = tk.Toplevel(parent)
+        self.window.title(title)
+        self.window.geometry("520x270")
+        self.window.resizable(False, False)
+        self.window.transient(parent)
+        self.window.grab_set()
+
+        self.create_ui()
+        self.fill_fields()
+        self.fields["name"].focus_set()
+
+    def create_ui(self):
+        form_frame = ttk.Frame(self.window, padding=12)
+        form_frame.pack(fill="both", expand=True)
+        form_frame.columnconfigure(1, weight=1)
+
+        for row, (label_text, key) in enumerate((
+            ("Название", "name"),
+            ("ИНН", "inn"),
+            ("ОГРН", "ogrn"),
+            ("Адрес", "address"),
+        )):
+            tk.Label(form_frame, text=label_text, font=FONT).grid(
+                row=row, column=0, sticky="w", padx=(0, 8), pady=6
+            )
+            entry = tk.Entry(form_frame, font=FONT)
+            entry.grid(row=row, column=1, sticky="ew", pady=6)
+            self.fields[key] = entry
+
+        buttons_frame = ttk.Frame(form_frame)
+        buttons_frame.grid(row=4, column=0, columnspan=2, sticky="e", pady=(14, 0))
+
+        tk.Button(
+            buttons_frame,
+            text="Сохранить",
+            font=FONT,
+            command=self.save,
+            width=14,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
+            text="Отмена",
+            font=FONT,
+            command=self.window.destroy,
+            width=14,
+        ).pack(side="left")
+
+    def fill_fields(self):
+        for key, entry in self.fields.items():
+            entry.insert(0, self.bank.get(key, ""))
+
+    def collect_data(self):
+        return {
+            "name": self.fields["name"].get().strip(),
+            "inn": self.fields["inn"].get().strip(),
+            "ogrn": self.fields["ogrn"].get().strip(),
+            "address": self.fields["address"].get().strip(),
+        }
+
+    def save(self):
+        if self.on_save(self.collect_data()):
+            self.window.destroy()
+
+
+class BankDetailsDialog:
+    def __init__(self, parent, bank, on_edit=None):
+        self.parent = parent
+        self.bank = bank
+        self.on_edit = on_edit
+
+        self.window = tk.Toplevel(parent)
+        self.window.title("Информация о банке")
+        self.window.geometry("560x420")
+        self.window.minsize(460, 340)
+        self.window.transient(parent)
+
+        self.create_ui()
+
+    def create_ui(self):
+        frame = ttk.Frame(self.window, padding=12)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(4, weight=1)
+        frame.rowconfigure(5, weight=1)
+
+        self.add_value_row(frame, "Название", self.bank.get("name", ""), 0)
+        self.add_value_row(frame, "ИНН", self.bank.get("inn", ""), 1)
+        self.add_value_row(frame, "ОГРН", self.bank.get("ogrn", ""), 2)
+        self.add_value_row(frame, "Адрес", self.bank.get("address", ""), 3)
+        self.add_text_row(frame, "Филиалы", "\n".join(self.bank.get("branches", [])), 4)
+        self.add_text_row(frame, "Альтернативные названия", "\n".join(self.bank.get("aliases", [])), 5)
+
+        buttons_frame = ttk.Frame(frame)
+        buttons_frame.grid(row=6, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+        if self.on_edit:
+            tk.Button(
+                buttons_frame,
+                text="Изменить",
+                font=FONT,
+                command=self.open_edit,
+                width=14,
+            ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
+            text="Закрыть",
+            font=FONT,
+            command=self.window.destroy,
+            width=14,
+        ).pack(side="left")
+
+    def add_value_row(self, frame, label_text, value, row):
+        tk.Label(frame, text=label_text, font=FONT).grid(
+            row=row, column=0, sticky="nw", padx=(0, 8), pady=4
+        )
+        tk.Label(
+            frame,
+            text=value or "—",
+            font=FONT,
+            anchor="w",
+            justify="left",
+            wraplength=360,
+        ).grid(row=row, column=1, sticky="ew", pady=4)
+
+    def add_text_row(self, frame, label_text, value, row):
+        tk.Label(frame, text=label_text, font=FONT).grid(
+            row=row, column=0, sticky="nw", padx=(0, 8), pady=4
+        )
+        text = tk.Text(frame, height=4, font=FONT, wrap="word")
+        text.grid(row=row, column=1, sticky="nsew", pady=4)
+        text.insert("1.0", value or "—")
+        text.configure(state="disabled")
+
+    def open_edit(self):
+        self.window.destroy()
+        self.on_edit()
 
 
 if __name__ == "__main__":
