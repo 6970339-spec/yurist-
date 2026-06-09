@@ -44,7 +44,8 @@ def ensure_banks_schema(conn):
             name TEXT NOT NULL,
             inn TEXT,
             ogrn TEXT,
-            address TEXT
+            address TEXT,
+            source_text TEXT NOT NULL DEFAULT ''
         )
     """)
 
@@ -58,6 +59,7 @@ def ensure_banks_schema(conn):
         "inn": "TEXT",
         "ogrn": "TEXT",
         "address": "TEXT",
+        "source_text": "TEXT",
     }.items():
         if column_name not in existing_columns:
             cursor.execute(f"ALTER TABLE banks ADD COLUMN {column_name} {column_type}")
@@ -107,6 +109,76 @@ def row_to_bank(row):
         "ogrn": row["ogrn"] or "",
         "address": row["address"] or "",
     }
+
+
+def build_source_text(data):
+    name = (data.get("name") or "").strip()
+    inn = (data.get("inn") or "").strip()
+    ogrn = (data.get("ogrn") or "").strip()
+    address = (data.get("address") or "").strip()
+
+    return f"{name} ИНН {inn} ОГРН {ogrn} {address}".strip()
+
+
+def quote_identifier(identifier):
+    return f'"{identifier.replace(chr(34), chr(34) + chr(34))}"'
+
+
+def get_banks_columns(cursor):
+    return [
+        {
+            "name": row[1],
+            "type": (row[2] or "").upper(),
+            "notnull": bool(row[3]),
+            "default": row[4],
+            "pk": bool(row[5]),
+        }
+        for row in cursor.execute("PRAGMA table_info(banks)").fetchall()
+    ]
+
+
+def get_required_column_value(column, data):
+    column_name = column["name"]
+
+    if column_name == "source_text":
+        return build_source_text(data)
+
+    if column_name in data:
+        return data.get(column_name) or ""
+
+    column_type = column["type"]
+    if "INT" in column_type:
+        return 0
+    if any(type_name in column_type for type_name in ("REAL", "FLOA", "DOUB")):
+        return 0.0
+    if "BLOB" in column_type:
+        return b""
+
+    return ""
+
+
+def build_insert_values(cursor, data):
+    base_values = {
+        "name": (data.get("name") or "").strip(),
+        "inn": (data.get("inn") or "").strip(),
+        "ogrn": (data.get("ogrn") or "").strip(),
+        "address": (data.get("address") or "").strip(),
+        "source_text": build_source_text(data),
+    }
+    insert_values = {}
+
+    for column in get_banks_columns(cursor):
+        column_name = column["name"]
+
+        if column["pk"]:
+            continue
+
+        if column_name in base_values:
+            insert_values[column_name] = base_values[column_name]
+        elif column["notnull"] and column["default"] is None:
+            insert_values[column_name] = get_required_column_value(column, data)
+
+    return insert_values
 
 
 def search_banks(query, limit=100):
@@ -198,15 +270,13 @@ def add_bank(data):
     cursor = conn.cursor()
 
     try:
-        cursor.execute("""
-            INSERT INTO banks (name, inn, ogrn, address)
-            VALUES (?, ?, ?, ?)
-        """, (
-            name,
-            (data.get("inn") or "").strip(),
-            (data.get("ogrn") or "").strip(),
-            (data.get("address") or "").strip(),
-        ))
+        insert_values = build_insert_values(cursor, data)
+        columns_sql = ", ".join(quote_identifier(column) for column in insert_values)
+        placeholders_sql = ", ".join("?" for _ in insert_values)
+        cursor.execute(
+            f"INSERT INTO banks ({columns_sql}) VALUES ({placeholders_sql})",
+            tuple(insert_values.values()),
+        )
         bank_id = cursor.lastrowid
         save_bank_related_rows(cursor, bank_id, data)
         conn.commit()
@@ -227,17 +297,33 @@ def update_bank(bank_id, data):
     cursor = conn.cursor()
 
     try:
-        cursor.execute("""
-            UPDATE banks
-            SET name = ?, inn = ?, ogrn = ?, address = ?
-            WHERE id = ?
-        """, (
-            name,
-            (data.get("inn") or "").strip(),
-            (data.get("ogrn") or "").strip(),
-            (data.get("address") or "").strip(),
-            bank_id,
-        ))
+        update_values = {
+            "name": name,
+            "inn": (data.get("inn") or "").strip(),
+            "ogrn": (data.get("ogrn") or "").strip(),
+            "address": (data.get("address") or "").strip(),
+        }
+        existing_columns = {column["name"] for column in get_banks_columns(cursor)}
+
+        if "source_text" in existing_columns:
+            update_values["source_text"] = build_source_text(data)
+
+        set_sql = ", ".join(
+            f"{quote_identifier(column)} = ?"
+            for column in update_values
+            if column in existing_columns
+        )
+        params = [
+            value
+            for column, value in update_values.items()
+            if column in existing_columns
+        ]
+        params.append(bank_id)
+
+        cursor.execute(
+            f"UPDATE banks SET {set_sql} WHERE id = ?",
+            tuple(params),
+        )
 
         if cursor.rowcount == 0:
             raise BanksDatabaseError("Банк не найден в базе данных.")
