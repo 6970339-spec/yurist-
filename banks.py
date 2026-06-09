@@ -115,30 +115,18 @@ def search_banks(query, limit=100):
     query = (query or "").strip()
 
     if query:
+        like_value = f"%{query.upper()}%"
         cursor.execute("""
-            SELECT b.id, b.name, b.inn, b.ogrn, b.address,
-                   GROUP_CONCAT(a.alias, ' ') AS aliases_text
+            SELECT DISTINCT b.id, b.name, b.inn, b.ogrn, b.address
             FROM banks b
             LEFT JOIN bank_aliases a ON a.bank_id = b.id
-            GROUP BY b.id, b.name, b.inn, b.ogrn, b.address
+            WHERE UPPER(COALESCE(b.name, '')) LIKE ?
+               OR UPPER(COALESCE(b.inn, '')) LIKE ?
+               OR UPPER(COALESCE(b.ogrn, '')) LIKE ?
+               OR UPPER(COALESCE(a.alias, '')) LIKE ?
             ORDER BY b.name COLLATE NOCASE
-        """)
-        query_value = query.casefold()
-        rows = []
-
-        for row in cursor.fetchall():
-            searchable_text = " ".join((
-                row["name"] or "",
-                row["inn"] or "",
-                row["ogrn"] or "",
-                row["aliases_text"] or "",
-            )).casefold()
-
-            if query_value in searchable_text:
-                rows.append(row_to_bank(row))
-
-            if len(rows) >= limit:
-                break
+            LIMIT ?
+        """, (like_value, like_value, like_value, like_value, limit))
     else:
         cursor.execute("""
             SELECT id, name, inn, ogrn, address
@@ -146,8 +134,8 @@ def search_banks(query, limit=100):
             ORDER BY name COLLATE NOCASE
             LIMIT ?
         """, (limit,))
-        rows = [row_to_bank(row) for row in cursor.fetchall()]
 
+    rows = [row_to_bank(row) for row in cursor.fetchall()]
     conn.close()
     return rows
 
@@ -242,14 +230,9 @@ def update_bank(bank_id, data):
         if cursor.rowcount == 0:
             raise BanksDatabaseError("Банк не найден в базе данных.")
 
-        if "aliases" in data:
-            cursor.execute("DELETE FROM bank_aliases WHERE bank_id = ?", (bank_id,))
-            save_bank_aliases(cursor, bank_id, data.get("aliases"))
-
-        if "branches" in data:
-            cursor.execute("DELETE FROM bank_branches WHERE bank_id = ?", (bank_id,))
-            save_bank_branches(cursor, bank_id, data.get("branches"))
-
+        cursor.execute("DELETE FROM bank_aliases WHERE bank_id = ?", (bank_id,))
+        cursor.execute("DELETE FROM bank_branches WHERE bank_id = ?", (bank_id,))
+        save_bank_related_rows(cursor, bank_id, data)
         conn.commit()
     except BanksDatabaseError:
         conn.rollback()
@@ -285,21 +268,13 @@ def delete_bank(bank_id):
 
 
 def save_bank_related_rows(cursor, bank_id, data):
-    save_bank_aliases(cursor, bank_id, data.get("aliases"))
-    save_bank_branches(cursor, bank_id, data.get("branches"))
-
-
-def save_bank_aliases(cursor, bank_id, aliases_value):
-    aliases = normalize_multiline(aliases_value)
+    aliases = normalize_multiline(data.get("aliases"))
+    branches = normalize_multiline(data.get("branches"))
 
     cursor.executemany("""
         INSERT INTO bank_aliases (bank_id, alias)
         VALUES (?, ?)
     """, [(bank_id, alias) for alias in aliases])
-
-
-def save_bank_branches(cursor, bank_id, branches_value):
-    branches = normalize_multiline(branches_value)
 
     cursor.executemany("""
         INSERT INTO bank_branches (bank_id, branch)
