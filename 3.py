@@ -604,6 +604,22 @@ class YuristApp:
         self.creditors_tree.bind("<Double-Button-1>", lambda event: self.edit_creditor())
 
         row += 1
+
+        self.creditors_total_label = tk.Label(
+            frame,
+            text="Общая сумма задолженности: 0 руб.",
+            font=("Times New Roman", 12, "bold"),
+        )
+        self.creditors_total_label.grid(
+            row=row,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            padx=10,
+            pady=(2, 8),
+        )
+
+        row += 1
         return row
 
     def refresh_creditors_table(self):
@@ -626,6 +642,17 @@ class YuristApp:
                     creditor.get("contract_number", ""),
                 ),
             )
+
+        self.update_creditors_total_label()
+
+    def update_creditors_total_label(self):
+        if not hasattr(self, "creditors_total_label"):
+            return
+
+        _, total_debt = prepare_creditors_for_documents(self.creditors)
+        self.creditors_total_label.configure(
+            text=f"Общая сумма задолженности: {format_money(total_debt)} руб."
+        )
 
     def get_selected_creditor_index(self):
         selection = self.creditors_tree.selection()
