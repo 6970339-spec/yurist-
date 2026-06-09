@@ -322,6 +322,50 @@ def open_folder(path):
         subprocess.Popen(["xdg-open", path])
 
 
+def parse_money(value):
+    text = str(value or "").replace(" ", "").replace(" ", "").replace(",", ".")
+    allowed = "".join(ch for ch in text if ch.isdigit() or ch == ".")
+
+    if not allowed:
+        return 0.0
+
+    try:
+        return float(allowed)
+    except ValueError:
+        return 0.0
+
+
+def format_money(value):
+    amount = parse_money(value)
+
+    if amount.is_integer():
+        return f"{int(amount):,}".replace(",", " ")
+
+    return f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+
+
+def prepare_creditors_for_documents(creditors):
+    prepared_creditors = []
+    total_debt = 0.0
+
+    for creditor in creditors:
+        prepared_creditor = {
+            "name": creditor.get("name", ""),
+            "inn": creditor.get("inn", ""),
+            "ogrn": creditor.get("ogrn", ""),
+            "address": creditor.get("address", ""),
+            "debt_sum": creditor.get("debt_sum", ""),
+            "contract_date": creditor.get("contract_date", ""),
+            "contract_number": creditor.get("contract_number", ""),
+        }
+        debt_value = parse_money(prepared_creditor["debt_sum"])
+        total_debt += debt_value
+        prepared_creditor["debt_sum_formatted"] = format_money(debt_value)
+        prepared_creditors.append(prepared_creditor)
+
+    return prepared_creditors, total_debt
+
+
 class YuristApp:
     def __init__(self, root):
         self.root = root
@@ -333,6 +377,7 @@ class YuristApp:
         self.codes_count = count_codes_in_db()
         self.current_code_results = []
         self.bank_window = None
+        self.creditors = []
 
         self.create_menu()
         self.create_ui()
@@ -452,6 +497,8 @@ class YuristApp:
 
         row += 1
 
+        row = self.create_creditors_section(frame, row)
+
         tk.Button(
             frame,
             text="Сохранить клиента в базу",
@@ -472,6 +519,166 @@ class YuristApp:
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+    def create_creditors_section(self, frame, row):
+        tk.Label(
+            frame,
+            text="Кредиторы / банки",
+            font=("Times New Roman", 14, "bold"),
+        ).grid(row=row, column=0, columnspan=3, sticky="w", padx=10, pady=(16, 6))
+        row += 1
+
+        buttons_frame = ttk.Frame(frame)
+        buttons_frame.grid(row=row, column=0, columnspan=3, sticky="w", padx=10, pady=4)
+
+        tk.Button(
+            buttons_frame,
+            text="Добавить кредитора",
+            font=FONT,
+            command=self.add_creditor,
+            width=20,
+        ).pack(side="left", padx=(0, 6))
+
+        tk.Button(
+            buttons_frame,
+            text="Изменить",
+            font=FONT,
+            command=self.edit_creditor,
+            width=14,
+        ).pack(side="left", padx=6)
+
+        tk.Button(
+            buttons_frame,
+            text="Удалить",
+            font=FONT,
+            command=self.delete_creditor,
+            width=14,
+        ).pack(side="left", padx=6)
+
+        row += 1
+
+        columns = (
+            "number",
+            "name",
+            "inn",
+            "ogrn",
+            "address",
+            "debt_sum",
+            "contract_date",
+            "contract_number",
+        )
+        self.creditors_tree = ttk.Treeview(
+            frame,
+            columns=columns,
+            show="headings",
+            height=8,
+            selectmode="browse",
+        )
+
+        headings = {
+            "number": "№",
+            "name": "Банк / кредитор",
+            "inn": "ИНН",
+            "ogrn": "ОГРН",
+            "address": "Адрес",
+            "debt_sum": "Сумма долга",
+            "contract_date": "Дата договора",
+            "contract_number": "Номер договора / идентификатор договора",
+        }
+        widths = {
+            "number": 45,
+            "name": 180,
+            "inn": 110,
+            "ogrn": 130,
+            "address": 230,
+            "debt_sum": 110,
+            "contract_date": 120,
+            "contract_number": 220,
+        }
+
+        for column in columns:
+            self.creditors_tree.heading(column, text=headings[column])
+            self.creditors_tree.column(column, width=widths[column], minwidth=45, stretch=True)
+
+        self.creditors_tree.grid(row=row, column=0, columnspan=3, sticky="nsew", padx=10, pady=4)
+        self.creditors_tree.bind("<Double-Button-1>", lambda event: self.edit_creditor())
+
+        row += 1
+        return row
+
+    def refresh_creditors_table(self):
+        for item_id in self.creditors_tree.get_children():
+            self.creditors_tree.delete(item_id)
+
+        for index, creditor in enumerate(self.creditors, start=1):
+            self.creditors_tree.insert(
+                "",
+                tk.END,
+                iid=str(index - 1),
+                values=(
+                    index,
+                    creditor.get("name", ""),
+                    creditor.get("inn", ""),
+                    creditor.get("ogrn", ""),
+                    creditor.get("address", ""),
+                    creditor.get("debt_sum", ""),
+                    creditor.get("contract_date", ""),
+                    creditor.get("contract_number", ""),
+                ),
+            )
+
+    def get_selected_creditor_index(self):
+        selection = self.creditors_tree.selection()
+        if not selection:
+            return None
+
+        return int(selection[0])
+
+    def add_creditor(self):
+        CreditorDialog(
+            self.root,
+            title="Добавить кредитора",
+            on_save=self.save_new_creditor,
+        )
+
+    def edit_creditor(self):
+        index = self.get_selected_creditor_index()
+        if index is None:
+            messagebox.showerror("Кредиторы", "Выберите кредитора для изменения.")
+            return
+
+        CreditorDialog(
+            self.root,
+            title="Изменить кредитора",
+            creditor=self.creditors[index],
+            on_save=lambda data: self.save_existing_creditor(index, data),
+        )
+
+    def delete_creditor(self):
+        index = self.get_selected_creditor_index()
+        if index is None:
+            messagebox.showerror("Кредиторы", "Выберите кредитора для удаления.")
+            return
+
+        creditor_name = self.creditors[index].get("name", "")
+        if not messagebox.askyesno(
+            "Удаление кредитора",
+            f"Удалить кредитора «{creditor_name}» из карточки клиента?",
+        ):
+            return
+
+        self.creditors.pop(index)
+        self.refresh_creditors_table()
+
+    def save_new_creditor(self, creditor):
+        self.creditors.append(creditor)
+        self.refresh_creditors_table()
+        return True
+
+    def save_existing_creditor(self, index, creditor):
+        self.creditors[index] = creditor
+        self.refresh_creditors_table()
+        return True
 
     def on_passport_code_change(self, event):
         entry = event.widget
@@ -586,6 +793,11 @@ class YuristApp:
             f"к/п {data['passport_code']}"
         )
 
+        creditors, total_debt = prepare_creditors_for_documents(self.creditors)
+        data["creditors"] = creditors
+        data["total_debt"] = total_debt
+        data["total_debt_formatted"] = format_money(total_debt)
+
         return data
 
     def fill_form(self, data):
@@ -597,6 +809,9 @@ class YuristApp:
         if data.get("fill_date"):
             self.fill_date_entry.delete(0, tk.END)
             self.fill_date_entry.insert(0, data.get("fill_date"))
+
+        self.creditors = data.get("creditors", [])
+        self.refresh_creditors_table()
 
     def refresh_clients_list(self):
         self.clients = load_clients()
@@ -682,6 +897,151 @@ class YuristApp:
 
         open_folder(client_folder)
         messagebox.showinfo("Готово", "Документы сформированы и папка клиента открыта.")
+
+
+class CreditorDialog:
+    def __init__(self, parent, title, on_save, creditor=None):
+        self.parent = parent
+        self.on_save = on_save
+        self.creditor = creditor or {}
+        self.bank_results = []
+        self.fields = {}
+
+        self.window = tk.Toplevel(parent)
+        self.window.title(title)
+        self.window.geometry("720x520")
+        self.window.minsize(640, 460)
+        self.window.transient(parent)
+        self.window.grab_set()
+
+        self.create_ui()
+        self.fill_fields()
+        self.refresh_bank_results()
+
+    def create_ui(self):
+        self.window.columnconfigure(0, weight=1)
+        self.window.columnconfigure(1, weight=1)
+        self.window.rowconfigure(1, weight=1)
+
+        search_frame = ttk.Frame(self.window, padding=(10, 10, 10, 4))
+        search_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+        search_frame.columnconfigure(0, weight=1)
+
+        tk.Label(search_frame, text="Поиск банка в базе", font=FONT).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.bank_search_var = tk.StringVar()
+        bank_search_entry = tk.Entry(search_frame, textvariable=self.bank_search_var, font=FONT)
+        bank_search_entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        bank_search_entry.bind("<KeyRelease>", lambda event: self.refresh_bank_results())
+
+        results_frame = ttk.Frame(self.window, padding=(10, 0, 6, 8))
+        results_frame.grid(row=1, column=0, sticky="nsew")
+        results_frame.columnconfigure(0, weight=1)
+        results_frame.rowconfigure(0, weight=1)
+
+        self.bank_results_box = tk.Listbox(results_frame, height=10, font=FONT, exportselection=False)
+        self.bank_results_box.grid(row=0, column=0, sticky="nsew")
+        self.bank_results_box.bind("<<ListboxSelect>>", self.select_bank)
+        self.bank_results_box.bind("<Double-Button-1>", self.select_bank)
+
+        scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=self.bank_results_box.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.bank_results_box.configure(yscrollcommand=scrollbar.set)
+
+        form_frame = ttk.Frame(self.window, padding=(6, 0, 10, 8))
+        form_frame.grid(row=1, column=1, sticky="nsew")
+        form_frame.columnconfigure(1, weight=1)
+
+        for row, (label_text, key) in enumerate((
+            ("Банк / кредитор", "name"),
+            ("ИНН", "inn"),
+            ("ОГРН", "ogrn"),
+            ("Адрес", "address"),
+            ("Сумма долга", "debt_sum"),
+            ("Дата договора", "contract_date"),
+            ("Номер договора / идентификатор", "contract_number"),
+        )):
+            tk.Label(form_frame, text=label_text, font=FONT).grid(
+                row=row, column=0, sticky="w", padx=(0, 8), pady=4
+            )
+            entry = tk.Entry(form_frame, font=FONT)
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            self.fields[key] = entry
+
+        buttons_frame = ttk.Frame(self.window, padding=(10, 0, 10, 10))
+        buttons_frame.grid(row=2, column=0, columnspan=2, sticky="e")
+
+        tk.Button(
+            buttons_frame,
+            text="Сохранить",
+            font=FONT,
+            command=self.save,
+            width=14,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
+            text="Отмена",
+            font=FONT,
+            command=self.window.destroy,
+            width=14,
+        ).pack(side="left")
+
+    def fill_fields(self):
+        for key, entry in self.fields.items():
+            entry.insert(0, self.creditor.get(key, ""))
+
+    def refresh_bank_results(self):
+        self.bank_results_box.delete(0, tk.END)
+
+        try:
+            self.bank_results = search_banks(self.bank_search_var.get(), limit=50)
+        except BanksDatabaseError as exc:
+            self.bank_results = []
+            self.bank_results_box.insert(tk.END, str(exc))
+            return
+
+        for bank in self.bank_results:
+            self.bank_results_box.insert(
+                tk.END,
+                f"{bank.get('name', '')} | {bank.get('inn', '')} | {bank.get('ogrn', '')}",
+            )
+
+    def select_bank(self, event=None):
+        selection = self.bank_results_box.curselection()
+        if not selection or selection[0] >= len(self.bank_results):
+            return
+
+        bank = self.bank_results[selection[0]]
+        self.set_field("name", bank.get("name", ""))
+        self.set_field("inn", bank.get("inn", ""))
+        self.set_field("ogrn", bank.get("ogrn", ""))
+        self.set_field("address", bank.get("address", ""))
+
+    def set_field(self, key, value):
+        self.fields[key].delete(0, tk.END)
+        self.fields[key].insert(0, value)
+
+    def collect_data(self):
+        return {
+            "name": self.fields["name"].get().strip(),
+            "inn": self.fields["inn"].get().strip(),
+            "ogrn": self.fields["ogrn"].get().strip(),
+            "address": self.fields["address"].get().strip(),
+            "debt_sum": self.fields["debt_sum"].get().strip(),
+            "contract_date": self.fields["contract_date"].get().strip(),
+            "contract_number": self.fields["contract_number"].get().strip(),
+        }
+
+    def save(self):
+        data = self.collect_data()
+        if not data["name"]:
+            messagebox.showerror("Кредиторы", "Заполните название банка или кредитора.", parent=self.window)
+            return
+
+        if self.on_save(data):
+            self.window.destroy()
 
 
 class BanksWindow:
