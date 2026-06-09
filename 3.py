@@ -10,6 +10,15 @@ from tkcalendar import DateEntry
 from docxtpl import DocxTemplate
 import pymorphy3
 
+from banks import (
+    BanksDatabaseError,
+    add_bank,
+    delete_bank,
+    get_bank_details,
+    search_banks,
+    update_bank,
+)
+
 FONT = ("Times New Roman", 12)
 BG_OK = "white"
 BG_ERROR = "#ffcccc"
@@ -323,9 +332,30 @@ class YuristApp:
         self.clients = load_clients()
         self.codes_count = count_codes_in_db()
         self.current_code_results = []
+        self.bank_window = None
 
+        self.create_menu()
         self.create_ui()
         self.refresh_clients_list()
+
+    def create_menu(self):
+        menu_bar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        file_menu.add_command(label="Выход", command=self.root.quit)
+        menu_bar.add_cascade(label="Файл", menu=file_menu)
+
+        menu_bar.add_command(label="Банки", command=self.open_banks_window)
+
+        self.root.config(menu=menu_bar)
+
+    def open_banks_window(self):
+        if self.bank_window and self.bank_window.window.winfo_exists():
+            self.bank_window.window.lift()
+            self.bank_window.window.focus_force()
+            return
+
+        self.bank_window = BanksWindow(self.root)
 
     def create_ui(self):
         canvas = tk.Canvas(self.root)
@@ -652,6 +682,228 @@ class YuristApp:
 
         open_folder(client_folder)
         messagebox.showinfo("Готово", "Документы сформированы и папка клиента открыта.")
+
+
+class BanksWindow:
+    def __init__(self, parent):
+        self.parent = parent
+        self.window = tk.Toplevel(parent)
+        self.window.title("Банки")
+        self.window.geometry("980x620")
+        self.window.minsize(860, 520)
+
+        self.current_bank_id = None
+        self.current_results = []
+        self.fields = {}
+
+        self.create_ui()
+        self.refresh_results()
+
+    def create_ui(self):
+        self.window.columnconfigure(0, weight=1)
+        self.window.columnconfigure(1, weight=2)
+        self.window.rowconfigure(0, weight=1)
+
+        left_frame = ttk.Frame(self.window, padding=10)
+        left_frame.grid(row=0, column=0, sticky="nsew")
+        left_frame.rowconfigure(2, weight=1)
+        left_frame.columnconfigure(0, weight=1)
+
+        tk.Label(left_frame, text="Поиск банка", font=FONT).grid(
+            row=0, column=0, sticky="w"
+        )
+
+        self.search_var = tk.StringVar()
+        search_entry = tk.Entry(left_frame, textvariable=self.search_var, font=FONT)
+        search_entry.grid(row=1, column=0, sticky="ew", pady=(4, 8))
+        search_entry.bind("<KeyRelease>", lambda event: self.refresh_results())
+
+        self.banks_listbox = tk.Listbox(left_frame, font=FONT, exportselection=False)
+        self.banks_listbox.grid(row=2, column=0, sticky="nsew")
+        self.banks_listbox.bind("<<ListboxSelect>>", self.select_bank)
+
+        list_scrollbar = ttk.Scrollbar(
+            left_frame, orient="vertical", command=self.banks_listbox.yview
+        )
+        list_scrollbar.grid(row=2, column=1, sticky="ns")
+        self.banks_listbox.configure(yscrollcommand=list_scrollbar.set)
+
+        right_frame = ttk.Frame(self.window, padding=10)
+        right_frame.grid(row=0, column=1, sticky="nsew")
+        right_frame.columnconfigure(1, weight=1)
+        right_frame.rowconfigure(4, weight=1)
+        right_frame.rowconfigure(5, weight=1)
+
+        self.add_entry_field(right_frame, "Название", "name", 0)
+        self.add_entry_field(right_frame, "ИНН", "inn", 1)
+        self.add_entry_field(right_frame, "ОГРН", "ogrn", 2)
+        self.add_entry_field(right_frame, "Адрес", "address", 3)
+        self.add_text_field(right_frame, "Филиалы", "branches", 4)
+        self.add_text_field(right_frame, "Альтернативные названия", "aliases", 5)
+
+        buttons_frame = ttk.Frame(self.window, padding=(10, 0, 10, 10))
+        buttons_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        tk.Button(
+            buttons_frame,
+            text="Добавить",
+            font=FONT,
+            command=self.clear_form,
+            width=22,
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            buttons_frame,
+            text="Сохранить изменения",
+            font=FONT,
+            command=self.save_bank,
+            width=24,
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            buttons_frame,
+            text="Удалить",
+            font=FONT,
+            command=self.remove_bank,
+            width=18,
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            buttons_frame,
+            text="Закрыть",
+            font=FONT,
+            command=self.window.destroy,
+            width=18,
+        ).pack(side="right", padx=4)
+
+    def add_entry_field(self, frame, label_text, key, row):
+        tk.Label(frame, text=label_text, font=FONT).grid(
+            row=row, column=0, sticky="nw", padx=(0, 8), pady=4
+        )
+
+        entry = tk.Entry(frame, font=FONT)
+        entry.grid(row=row, column=1, sticky="ew", pady=4)
+        self.fields[key] = entry
+
+    def add_text_field(self, frame, label_text, key, row):
+        tk.Label(frame, text=label_text, font=FONT).grid(
+            row=row, column=0, sticky="nw", padx=(0, 8), pady=4
+        )
+
+        text = tk.Text(frame, height=6, font=FONT, wrap="word")
+        text.grid(row=row, column=1, sticky="nsew", pady=4)
+        self.fields[key] = text
+
+    def refresh_results(self):
+        self.banks_listbox.delete(0, tk.END)
+
+        try:
+            self.current_results = search_banks(self.search_var.get())
+        except BanksDatabaseError as exc:
+            self.current_results = []
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return
+
+        for bank in self.current_results:
+            extra = []
+            if bank.get("inn"):
+                extra.append(f"ИНН {bank['inn']}")
+            if bank.get("ogrn"):
+                extra.append(f"ОГРН {bank['ogrn']}")
+
+            suffix = f" ({', '.join(extra)})" if extra else ""
+            self.banks_listbox.insert(tk.END, f"{bank['name']}{suffix}")
+
+    def select_bank(self, event):
+        selection = self.banks_listbox.curselection()
+        if not selection:
+            return
+
+        bank_id = self.current_results[selection[0]]["id"]
+
+        try:
+            bank = get_bank_details(bank_id)
+        except BanksDatabaseError as exc:
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return
+
+        if not bank:
+            messagebox.showerror("База банков", "Банк не найден.", parent=self.window)
+            self.refresh_results()
+            return
+
+        self.current_bank_id = bank_id
+        self.fill_form(bank)
+
+    def collect_form_data(self):
+        return {
+            "name": self.fields["name"].get().strip(),
+            "inn": self.fields["inn"].get().strip(),
+            "ogrn": self.fields["ogrn"].get().strip(),
+            "address": self.fields["address"].get().strip(),
+            "branches": self.fields["branches"].get("1.0", tk.END).strip(),
+            "aliases": self.fields["aliases"].get("1.0", tk.END).strip(),
+        }
+
+    def fill_form(self, bank):
+        for key in ("name", "inn", "ogrn", "address"):
+            self.fields[key].delete(0, tk.END)
+            self.fields[key].insert(0, bank.get(key, ""))
+
+        self.fields["branches"].delete("1.0", tk.END)
+        self.fields["branches"].insert("1.0", "\n".join(bank.get("branches", [])))
+
+        self.fields["aliases"].delete("1.0", tk.END)
+        self.fields["aliases"].insert("1.0", "\n".join(bank.get("aliases", [])))
+
+    def clear_form(self):
+        self.current_bank_id = None
+
+        for key in ("name", "inn", "ogrn", "address"):
+            self.fields[key].delete(0, tk.END)
+
+        self.fields["branches"].delete("1.0", tk.END)
+        self.fields["aliases"].delete("1.0", tk.END)
+        self.fields["name"].focus_set()
+
+    def save_bank(self):
+        data = self.collect_form_data()
+
+        try:
+            if self.current_bank_id:
+                update_bank(self.current_bank_id, data)
+                message = "Изменения банка сохранены."
+            else:
+                self.current_bank_id = add_bank(data)
+                message = "Банк добавлен."
+        except BanksDatabaseError as exc:
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return
+
+        self.refresh_results()
+        messagebox.showinfo("База банков", message, parent=self.window)
+
+    def remove_bank(self):
+        if not self.current_bank_id:
+            messagebox.showerror("База банков", "Выберите банк для удаления.", parent=self.window)
+            return
+
+        if not messagebox.askyesno(
+            "Удаление банка",
+            "Удалить выбранный банк из базы данных?",
+            parent=self.window,
+        ):
+            return
+
+        try:
+            delete_bank(self.current_bank_id)
+        except BanksDatabaseError as exc:
+            messagebox.showerror("База банков", str(exc), parent=self.window)
+            return
+
+        self.clear_form()
+        self.refresh_results()
+        messagebox.showinfo("База банков", "Банк удалён.", parent=self.window)
 
 
 if __name__ == "__main__":
