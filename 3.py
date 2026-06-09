@@ -4,6 +4,7 @@ import json
 import sqlite3
 import platform
 import subprocess
+import importlib
 from copy import deepcopy
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -36,6 +37,7 @@ CLIENTS_FILE = os.path.join(DATA_DIR, "clients.json")
 
 CODES_TXT_FILE = "codes_pass.txt"
 CODES_DB_FILE = os.path.join(DATA_DIR, "passport_codes.db")
+DADATA_TOKEN = "cae6427b82a9aa8e2289ffc19e06332c9c6d08ee"
 
 morph = pymorphy3.MorphAnalyzer()
 
@@ -193,6 +195,23 @@ def recreate_passport_codes_db():
 def create_passport_codes_db_if_needed():
     if not os.path.exists(CODES_DB_FILE):
         recreate_passport_codes_db()
+
+
+def search_address_by_postal_code(postal_code):
+    try:
+        dadata_module = importlib.import_module("dadata")
+    except ImportError as exc:
+        raise RuntimeError("Установите библиотеку: pip install dadata") from exc
+
+    try:
+        dadata = dadata_module.Dadata(DADATA_TOKEN)
+        return dadata.suggest("address", postal_code, count=10)
+    except Exception as exc:
+        raise RuntimeError("Не удалось получить адрес по индексу.") from exc
+    finally:
+        close = locals().get("dadata") and getattr(dadata, "close", None)
+        if close:
+            close()
 
 
 def search_passport_codes(query, limit=10):
@@ -495,6 +514,8 @@ class YuristApp:
         self.current_code_results = []
         self.bank_window = None
         self.creditors = []
+        self.last_postal_code_lookup = ""
+        self.postal_code_after_id = None
 
         self.create_menu()
         self.create_ui()
@@ -574,6 +595,10 @@ class YuristApp:
 
             elif key == "passport_code":
                 entry.bind("<KeyRelease>", self.on_passport_code_change)
+
+            elif key == "postal_code":
+                entry.bind("<KeyRelease>", self.on_postal_code_change)
+                entry.bind("<FocusOut>", self.on_postal_code_focus_out)
 
             elif key in digit_limits:
                 max_len = digit_limits[key]
@@ -823,6 +848,79 @@ class YuristApp:
         self.creditors[index] = creditor
         self.refresh_creditors_table()
         return True
+
+    def on_postal_code_change(self, event):
+        entry = event.widget
+        digits = only_digits(entry.get(), digit_limits["postal_code"])
+        entry.delete(0, tk.END)
+        entry.insert(0, digits)
+        entry.configure(bg=BG_OK if len(digits) == digit_limits["postal_code"] else BG_ERROR)
+
+        if len(digits) == digit_limits["postal_code"]:
+            self.schedule_postal_code_lookup(digits)
+
+    def on_postal_code_focus_out(self, event):
+        digits = only_digits(event.widget.get(), digit_limits["postal_code"])
+        if len(digits) == digit_limits["postal_code"]:
+            self.schedule_postal_code_lookup(digits, delay_ms=0)
+
+    def schedule_postal_code_lookup(self, postal_code, delay_ms=600):
+        if postal_code == self.last_postal_code_lookup:
+            return
+
+        if self.postal_code_after_id:
+            self.root.after_cancel(self.postal_code_after_id)
+
+        self.postal_code_after_id = self.root.after(
+            delay_ms,
+            lambda code=postal_code: self.lookup_postal_code(code),
+        )
+
+    def lookup_postal_code(self, postal_code):
+        self.postal_code_after_id = None
+
+        if postal_code == self.last_postal_code_lookup:
+            return
+
+        self.last_postal_code_lookup = postal_code
+
+        try:
+            suggestions = search_address_by_postal_code(postal_code)
+        except RuntimeError as exc:
+            messagebox.showerror("DaData", str(exc))
+            return
+
+        if not suggestions:
+            messagebox.showinfo("DaData", "Адрес по индексу не найден.")
+            return
+
+        if len(suggestions) == 1:
+            self.fill_address_from_dadata(suggestions[0].get("data", {}))
+            return
+
+        AddressSelectionDialog(
+            self.root,
+            suggestions,
+            on_select=self.fill_address_from_dadata,
+        )
+
+    def fill_address_from_dadata(self, address_data):
+        mapping = {
+            "postal_code": address_data.get("postal_code", ""),
+            "region": address_data.get("region_with_type") or address_data.get("region", ""),
+            "district": address_data.get("area_with_type") or address_data.get("area", ""),
+            "city": address_data.get("city_with_type") or address_data.get("settlement_with_type", ""),
+            "locality": address_data.get("settlement_with_type", ""),
+            "street": address_data.get("street_with_type", ""),
+            "house": address_data.get("house", ""),
+            "building": address_data.get("block", ""),
+        }
+
+        for key, value in mapping.items():
+            if value and key in self.entries:
+                self.entries[key].delete(0, tk.END)
+                self.entries[key].insert(0, value)
+                self.entries[key].configure(bg=BG_OK)
 
     def on_passport_code_change(self, event):
         entry = event.widget
@@ -1079,6 +1177,74 @@ class YuristApp:
             f"Документы сформированы: {len(generated_files)} из {len(TEMPLATES)}. "
             "Папка клиента открыта.",
         )
+
+
+class AddressSelectionDialog:
+    def __init__(self, parent, suggestions, on_select):
+        self.parent = parent
+        self.suggestions = suggestions
+        self.on_select = on_select
+
+        self.window = tk.Toplevel(parent)
+        self.window.title("Выбор адреса")
+        self.window.geometry("720x320")
+        self.window.minsize(560, 260)
+        self.window.transient(parent)
+        self.window.grab_set()
+
+        self.create_ui()
+
+    def create_ui(self):
+        frame = ttk.Frame(self.window, padding=10)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        tk.Label(
+            frame,
+            text="Найдено несколько адресов. Выберите нужный:",
+            font=FONT,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        self.listbox = tk.Listbox(frame, font=FONT, exportselection=False)
+        self.listbox.grid(row=1, column=0, sticky="nsew")
+        self.listbox.bind("<Double-Button-1>", lambda event: self.select_address())
+
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.listbox.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+
+        for suggestion in self.suggestions:
+            self.listbox.insert(tk.END, suggestion.get("value", ""))
+
+        buttons_frame = ttk.Frame(frame)
+        buttons_frame.grid(row=2, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+        tk.Button(
+            buttons_frame,
+            text="Выбрать",
+            font=FONT,
+            command=self.select_address,
+            width=14,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
+            text="Отмена",
+            font=FONT,
+            command=self.window.destroy,
+            width=14,
+        ).pack(side="left")
+
+    def select_address(self):
+        selection = self.listbox.curselection()
+        if not selection:
+            messagebox.showerror("DaData", "Выберите адрес из списка.", parent=self.window)
+            return
+
+        suggestion = self.suggestions[selection[0]]
+        self.on_select(suggestion.get("data", {}))
+        self.window.destroy()
 
 
 class CreditorDialog:
