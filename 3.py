@@ -348,15 +348,20 @@ def prepare_creditors_for_documents(creditors):
     prepared_creditors = []
     total_debt = 0.0
 
-    for creditor in creditors:
+    for index, creditor in enumerate(creditors, start=1):
+        contract_date = creditor.get("contract_date", "")
         prepared_creditor = {
+            "row_number": f"1.{index}",
+            "obligation_type": "Кредит",
             "name": creditor.get("name", ""),
             "inn": creditor.get("inn", ""),
             "ogrn": creditor.get("ogrn", ""),
             "address": creditor.get("address", ""),
+            "contract_basis": f"Кредитный договор от {contract_date}".strip(),
             "debt_sum": creditor.get("debt_sum", ""),
-            "contract_date": creditor.get("contract_date", ""),
+            "contract_date": contract_date,
             "contract_number": creditor.get("contract_number", ""),
+            "penalty": "0",
         }
         debt_value = parse_money(prepared_creditor["debt_sum"])
         total_debt += debt_value
