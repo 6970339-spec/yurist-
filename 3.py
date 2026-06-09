@@ -967,6 +967,10 @@ class CreditorDialog:
             )
             entry = tk.Entry(form_frame, font=FONT)
             entry.grid(row=row, column=1, sticky="ew", pady=4)
+
+            if key == "contract_date":
+                entry.bind("<KeyRelease>", auto_date_format)
+
             self.fields[key] = entry
 
         buttons_frame = ttk.Frame(self.window, padding=(10, 0, 10, 10))
