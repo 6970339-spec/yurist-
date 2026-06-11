@@ -5,6 +5,7 @@ import sqlite3
 import platform
 import subprocess
 import importlib
+import re
 from copy import deepcopy
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -111,6 +112,149 @@ def normalize_passport_code(value):
     if len(digits) == 6:
         return f"{digits[:3]}-{digits[3:]}"
     return value.strip()
+
+
+def normalize_gosuslugi_label(value):
+    return re.sub(r"[^а-яёa-z0-9]+", "", value.lower())
+
+
+def find_next_gosuslugi_value(lines, labels):
+    normalized_labels = {normalize_gosuslugi_label(label) for label in labels}
+
+    for index, line in enumerate(lines):
+        if normalize_gosuslugi_label(line) in normalized_labels:
+            for next_line in lines[index + 1:]:
+                if next_line.strip():
+                    return next_line.strip()
+
+    return ""
+
+
+def find_value_after_label_in_text(text, label, pattern):
+    match = re.search(
+        rf"{label}\s*[:\n\r]+(?P<value>[\s\S]{{0,120}}?)({pattern})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(2) if match else ""
+
+
+def parse_gosuslugi_address(address_text):
+    result = {}
+    text = " ".join(address_text.replace("\n", ", ").split())
+
+    postal_match = re.search(r"\b(\d{6})\b", text)
+    if postal_match:
+        result["postal_code"] = postal_match.group(1)
+
+    parts = [part.strip() for part in re.split(r"[,;]", text) if part.strip()]
+
+    for part in parts:
+        lower_part = part.lower()
+
+        if "район" in lower_part or " р-н" in lower_part:
+            result.setdefault("district", part)
+        elif any(word in lower_part for word in ("республика", "область", "край", "автоном")):
+            result.setdefault("region", part)
+        elif re.search(r"\bг\.?\s+", lower_part) or "город" in lower_part:
+            result.setdefault("city", part)
+        elif any(word in lower_part for word in ("село", "поселок", "посёлок", "деревня", "пгт")) or re.search(r"\b[сдп]\.?\s+", lower_part):
+            result.setdefault("locality", part)
+        elif re.search(r"\bул\.?\s+", lower_part) or "улица" in lower_part:
+            result.setdefault("street", part)
+
+    house_match = re.search(r"(?:\bд\.?|\bдом)\s*([\wА-Яа-яёЁ/-]+)", text, flags=re.IGNORECASE)
+    if house_match:
+        result["house"] = house_match.group(1)
+
+    building_match = re.search(r"(?:корп\.?|корпус)\s*([\wА-Яа-яёЁ/-]+)", text, flags=re.IGNORECASE)
+    if building_match:
+        result["building"] = building_match.group(1)
+
+    apartment_match = re.search(r"(?:кв\.?|квартира)\s*([\wА-Яа-яёЁ/-]+)", text, flags=re.IGNORECASE)
+    if apartment_match:
+        result["apartment"] = apartment_match.group(1)
+
+    return result
+
+
+def collect_gosuslugi_address_text(lines):
+    address_labels = {"адресрегистрации", "адрес", "регистрация"}
+    stop_labels = {
+        "паспорт", "выдан", "кодподразделения", "датавыдачи", "снилс", "инн",
+        "фамилия", "имя", "отчество", "датарождения", "месторождения",
+    }
+
+    for index, line in enumerate(lines):
+        normalized = normalize_gosuslugi_label(line)
+        if normalized in address_labels:
+            address_lines = []
+            for next_line in lines[index + 1:]:
+                normalized_next = normalize_gosuslugi_label(next_line)
+                if normalized_next in stop_labels:
+                    break
+                if next_line.strip():
+                    address_lines.append(next_line.strip())
+            return " ".join(address_lines)
+
+    return ""
+
+
+def parse_gosuslugi_text(text):
+    result = {}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    passport_value = find_next_gosuslugi_value(lines, ["Паспорт"])
+    passport_digits = only_digits(passport_value)
+    if len(passport_digits) >= 10:
+        result["passport_series"] = passport_digits[:4]
+        result["passport_number"] = passport_digits[4:10]
+    else:
+        passport_match = re.search(r"\b(\d{4})\s+(\d{6})\b", text)
+        if passport_match:
+            result["passport_series"] = passport_match.group(1)
+            result["passport_number"] = passport_match.group(2)
+
+    passport_issued_by = find_next_gosuslugi_value(lines, ["Выдан", "Кем выдан"])
+    if passport_issued_by:
+        result["passport_issued_by"] = passport_issued_by
+
+    passport_code = find_next_gosuslugi_value(lines, ["Код подразделения"])
+    if passport_code:
+        result["passport_code"] = normalize_passport_code(passport_code)
+
+    passport_issue_date = find_next_gosuslugi_value(lines, ["Дата выдачи"])
+    if passport_issue_date:
+        result["passport_issue_date"] = passport_issue_date
+
+    snils_text = find_next_gosuslugi_value(lines, ["СНИЛС"])
+    snils_digits = only_digits(snils_text) or only_digits(find_value_after_label_in_text(text, "СНИЛС", r"\d{3}[-\s]?\d{3}[-\s]?\d{3}\s?\d{2}"))
+    if len(snils_digits) >= 11:
+        result["snils"] = snils_digits[:11]
+
+    inn_text = find_next_gosuslugi_value(lines, ["ИНН"])
+    inn_digits = only_digits(inn_text) or only_digits(find_value_after_label_in_text(text, "ИНН", r"\d{12}"))
+    if len(inn_digits) >= 12:
+        result["inn"] = inn_digits[:12]
+
+    for labels, key in ((["Фамилия"], "surname"), (["Имя"], "name"), (["Отчество"], "patronymic")):
+        value = find_next_gosuslugi_value(lines, labels)
+        if value:
+            result[key] = value
+
+    birth_date = find_next_gosuslugi_value(lines, ["Дата рождения"])
+    if birth_date:
+        result["birth_date"] = birth_date
+
+    birth_place = find_next_gosuslugi_value(lines, ["Место рождения"])
+    if birth_place:
+        result["birth_place"] = birth_place
+
+    address_text = collect_gosuslugi_address_text(lines)
+    if address_text:
+        result.update(parse_gosuslugi_address(address_text))
+
+    return result
 
 
 def load_clients():
@@ -590,6 +734,16 @@ class YuristApp:
 
         row += 1
 
+        tk.Button(
+            frame,
+            text="Вставить данные с Госуслуг",
+            font=FONT,
+            command=self.open_gosuslugi_import_dialog,
+            width=30,
+        ).grid(row=row, column=0, columnspan=3, pady=8)
+
+        row += 1
+
         for label_text, key in fields:
             tk.Label(frame, text=label_text, font=FONT).grid(
                 row=row, column=0, sticky="w", padx=10, pady=4
@@ -669,6 +823,27 @@ class YuristApp:
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+    def open_gosuslugi_import_dialog(self):
+        GosuslugiImportDialog(self.root, self.import_gosuslugi_data)
+
+    def import_gosuslugi_data(self, text):
+        parsed_data = parse_gosuslugi_text(text)
+        found_fields = []
+
+        for key, value in parsed_data.items():
+            if not value or key not in self.entries:
+                continue
+
+            self.entries[key].delete(0, tk.END)
+            self.entries[key].insert(0, value)
+            self.entries[key].configure(bg=BG_OK)
+            found_fields.append(key)
+
+        if all(self.entries[key].get().strip() for key in ("surname", "name", "patronymic")):
+            self.auto_fill_genitive()
+
+        return found_fields
 
     def create_creditors_section(self, frame, row):
         tk.Label(
@@ -1188,6 +1363,86 @@ class YuristApp:
             f"Документы сформированы: {len(generated_files)} из {len(TEMPLATES)}. "
             "Папка клиента открыта.",
         )
+
+
+class GosuslugiImportDialog:
+    def __init__(self, parent, on_import):
+        self.parent = parent
+        self.on_import = on_import
+
+        self.window = tk.Toplevel(parent)
+        self.window.title("Данные с Госуслуг")
+        self.window.geometry("760x560")
+        self.window.minsize(620, 420)
+        self.window.transient(parent)
+        self.window.grab_set()
+
+        self.create_ui()
+
+    def create_ui(self):
+        frame = ttk.Frame(self.window, padding=10)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        tk.Label(
+            frame,
+            text="Вставьте скопированный блок данных с Госуслуг:",
+            font=FONT,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        self.text = tk.Text(frame, font=FONT, wrap="word")
+        self.text.grid(row=1, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        self.text.configure(yscrollcommand=scrollbar.set)
+
+        buttons_frame = ttk.Frame(frame)
+        buttons_frame.grid(row=2, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+        tk.Button(
+            buttons_frame,
+            text="Разобрать и заполнить",
+            font=FONT,
+            command=self.parse_and_fill,
+            width=22,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
+            text="Отмена",
+            font=FONT,
+            command=self.window.destroy,
+            width=14,
+        ).pack(side="left")
+
+    def parse_and_fill(self):
+        text = self.text.get("1.0", tk.END).strip()
+        if not text:
+            messagebox.showerror("Госуслуги", "Вставьте текст с Госуслуг.", parent=self.window)
+            return
+
+        found_fields = self.on_import(text)
+        if not found_fields:
+            messagebox.showinfo(
+                "Госуслуги",
+                "Не удалось найти данные для заполнения.",
+                parent=self.window,
+            )
+            return
+
+        field_names = {
+            key: label
+            for label, key in fields
+        }
+        found_text = ", ".join(field_names.get(key, key) for key in found_fields)
+        messagebox.showinfo(
+            "Госуслуги",
+            f"Найдено и заполнено: {found_text}",
+            parent=self.window,
+        )
+        self.window.destroy()
 
 
 class AddressSelectionDialog:
