@@ -1480,11 +1480,13 @@ class GosuslugiImportDialog:
     def __init__(self, parent, on_import):
         self.parent = parent
         self.on_import = on_import
+        self.accumulated_text = ""
+        self.blocks_count = 0
 
         self.window = tk.Toplevel(parent)
-        self.window.title("Данные с Госуслуг")
-        self.window.geometry("760x560")
-        self.window.minsize(620, 420)
+        self.window.title("Госуслуги")
+        self.window.geometry("280x220")
+        self.window.resizable(False, False)
         self.window.transient(parent)
         self.window.attributes("-topmost", True)
 
@@ -1494,73 +1496,58 @@ class GosuslugiImportDialog:
         frame = ttk.Frame(self.window, padding=10)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(1, weight=1)
 
-        tk.Label(
-            frame,
-            text="Вставляйте сюда несколько блоков данных с Госуслуг:",
-            font=FONT,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
-
-        self.text = tk.Text(frame, font=FONT, wrap="word")
-        self.text.grid(row=1, column=0, sticky="nsew")
-
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
-        scrollbar.grid(row=1, column=1, sticky="ns")
-        self.text.configure(yscrollcommand=scrollbar.set)
-
-        self.status_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(value="Скопируйте блок на Госуслугах")
         status_label = tk.Label(
             frame,
             textvariable=self.status_var,
             font=FONT,
             anchor="w",
+            justify="left",
+            wraplength=250,
             fg="blue",
         )
-        status_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-
-        buttons_frame = ttk.Frame(frame)
-        buttons_frame.grid(row=3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        status_label.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         tk.Button(
-            buttons_frame,
-            text="Вставить из буфера",
+            frame,
+            text="Вставить блок",
             font=FONT,
             command=self.paste_from_clipboard,
-            width=20,
-        ).pack(side="left", padx=(0, 8))
+            width=24,
+        ).grid(row=1, column=0, sticky="ew", pady=2)
 
         tk.Button(
-            buttons_frame,
+            frame,
             text="Разобрать",
             font=FONT,
             command=self.parse_and_fill,
-            width=12,
-        ).pack(side="left", padx=(0, 8))
+            width=24,
+        ).grid(row=2, column=0, sticky="ew", pady=2)
 
         tk.Button(
-            buttons_frame,
+            frame,
             text="Очистить",
             font=FONT,
             command=self.clear_text,
-            width=12,
-        ).pack(side="left", padx=(0, 8))
+            width=24,
+        ).grid(row=3, column=0, sticky="ew", pady=2)
 
         tk.Button(
-            buttons_frame,
-            text="Открыть основное окно",
+            frame,
+            text="Открыть Yurist+",
             font=FONT,
             command=self.show_main_window,
-            width=22,
-        ).pack(side="left", padx=(0, 8))
+            width=24,
+        ).grid(row=4, column=0, sticky="ew", pady=2)
 
         tk.Button(
-            buttons_frame,
+            frame,
             text="Закрыть",
             font=FONT,
             command=self.window.destroy,
-            width=10,
-        ).pack(side="left")
+            width=24,
+        ).grid(row=5, column=0, sticky="ew", pady=(8, 0))
 
     def get_clipboard_text(self):
         try:
@@ -1576,18 +1563,18 @@ class GosuslugiImportDialog:
             self.status_var.set("Буфер обмена пуст")
             return False
 
-        existing_text = self.text.get("1.0", tk.END).strip()
-        if existing_text:
-            self.text.insert(tk.END, self.BLOCK_SEPARATOR)
+        if self.accumulated_text:
+            self.accumulated_text += self.BLOCK_SEPARATOR
 
-        self.text.insert(tk.END, text)
-        self.text.see(tk.END)
-        self.status_var.set("Текст добавлен из буфера")
+        self.accumulated_text += text
+        self.blocks_count += 1
+        self.status_var.set(f"Добавлено блоков: {self.blocks_count}")
         return True
 
     def clear_text(self):
-        self.text.delete("1.0", tk.END)
-        self.status_var.set("")
+        self.accumulated_text = ""
+        self.blocks_count = 0
+        self.status_var.set("Очищено")
 
     def show_main_window(self):
         self.parent.lift()
@@ -1596,14 +1583,14 @@ class GosuslugiImportDialog:
         self.parent.after(700, lambda: self.parent.attributes("-topmost", False))
 
     def parse_and_fill(self):
-        text = self.text.get("1.0", tk.END).strip()
+        text = self.accumulated_text.strip()
         if not text:
             self.status_var.set("Нет текста для разбора")
             return
 
         found_fields = self.on_import(text)
         if not found_fields:
-            self.status_var.set("Не удалось найти данные для заполнения")
+            self.status_var.set("Не удалось найти данные")
             return
 
         groups = []
