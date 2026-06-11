@@ -2,10 +2,7 @@ import os
 import sqlite3
 
 DATA_DIR = "data"
-BANKS_DB_FILENAMES = (
-    os.path.join(DATA_DIR, "banks.db"),
-    "banks.db",
-)
+BANKS_DB_FILE = os.path.join(DATA_DIR, "banks.db")
 
 
 class BanksDatabaseError(Exception):
@@ -13,14 +10,10 @@ class BanksDatabaseError(Exception):
 
 
 def get_banks_db_path():
-    for path in BANKS_DB_FILENAMES:
-        if os.path.exists(path):
-            return path
+    if os.path.exists(BANKS_DB_FILE):
+        return BANKS_DB_FILE
 
-    raise BanksDatabaseError(
-        "База банков banks.db не найдена. Поместите файл banks.db в папку data "
-        "или в корень проекта."
-    )
+    raise BanksDatabaseError("Не найдена база банков: data/banks.db")
 
 
 def connect_banks_db():
@@ -181,7 +174,7 @@ def build_insert_values(cursor, data):
     return insert_values
 
 
-def search_banks(query, limit=100):
+def search_banks(query, limit=None):
     conn = connect_banks_db()
     cursor = conn.cursor()
     query = (query or "").strip()
@@ -203,21 +196,29 @@ def search_banks(query, limit=100):
                 row["name"] or "",
                 row["inn"] or "",
                 row["ogrn"] or "",
+                row["address"] or "",
                 row["aliases_text"] or "",
             )).casefold()
 
             if query_value in searchable_text:
                 rows.append(row_to_bank(row))
 
-            if len(rows) >= limit:
+            if limit is not None and len(rows) >= limit:
                 break
     else:
-        cursor.execute("""
-            SELECT id, name, inn, ogrn, address
-            FROM banks
-            ORDER BY name COLLATE NOCASE
-            LIMIT ?
-        """, (limit,))
+        if limit is None:
+            cursor.execute("""
+                SELECT id, name, inn, ogrn, address
+                FROM banks
+                ORDER BY name COLLATE NOCASE
+            """)
+        else:
+            cursor.execute("""
+                SELECT id, name, inn, ogrn, address
+                FROM banks
+                ORDER BY name COLLATE NOCASE
+                LIMIT ?
+            """, (limit,))
         rows = [row_to_bank(row) for row in cursor.fetchall()]
 
     conn.close()

@@ -1763,14 +1763,14 @@ class CreditorDialog:
 
 
 class BanksWindow:
-    SEARCH_PLACEHOLDER = "Поиск банка по названию, ИНН или ОГРН"
+    SEARCH_PLACEHOLDER = "Поиск по названию, ИНН, ОГРН или адресу"
 
     def __init__(self, parent):
         self.parent = parent
         self.window = tk.Toplevel(parent)
-        self.window.title("Банки")
-        self.window.geometry("900x600")
-        self.window.minsize(760, 480)
+        self.window.title("Справочник банков")
+        self.window.geometry("980x600")
+        self.window.minsize(860, 480)
 
         self.current_results = []
         self.search_placeholder_active = True
@@ -1798,27 +1798,69 @@ class BanksWindow:
         self.search_entry.bind("<FocusOut>", self.on_search_focus_out)
         self.search_entry.bind("<KeyRelease>", self.on_search_change)
 
+        buttons_frame = ttk.Frame(top_frame)
+        buttons_frame.grid(row=0, column=1, sticky="e")
+
         tk.Button(
-            top_frame,
+            buttons_frame,
             text="Добавить банк",
             font=FONT,
             command=self.open_add_dialog,
-            width=18,
-        ).grid(row=0, column=1, sticky="e")
+            width=16,
+        ).pack(side="left", padx=(0, 4))
+
+        tk.Button(
+            buttons_frame,
+            text="Изменить банк",
+            font=FONT,
+            command=self.open_edit_dialog_for_selected,
+            width=16,
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            buttons_frame,
+            text="Удалить банк",
+            font=FONT,
+            command=self.remove_selected_bank,
+            width=14,
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            buttons_frame,
+            text="Обновить список",
+            font=FONT,
+            command=self.refresh_results,
+            width=16,
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            buttons_frame,
+            text="Закрыть",
+            font=FONT,
+            command=self.window.destroy,
+            width=10,
+        ).pack(side="left", padx=(4, 0))
 
         list_frame = ttk.Frame(self.window, padding=(10, 0, 10, 10))
         list_frame.grid(row=1, column=0, sticky="nsew")
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
 
+        columns = ("name", "inn", "ogrn", "address")
         self.banks_tree = ttk.Treeview(
             list_frame,
-            columns=("bank",),
+            columns=columns,
             show="headings",
             selectmode="browse",
         )
-        self.banks_tree.heading("bank", text="Название банка | ИНН | ОГРН")
-        self.banks_tree.column("bank", width=820, minwidth=500, stretch=True)
+        self.banks_tree.heading("name", text="Название банка")
+        self.banks_tree.heading("inn", text="ИНН")
+        self.banks_tree.heading("ogrn", text="ОГРН")
+        self.banks_tree.heading("address", text="Адрес")
+        self.banks_tree.column("name", width=260, minwidth=160, stretch=True)
+        self.banks_tree.column("inn", width=120, minwidth=90, stretch=False)
+        self.banks_tree.column("ogrn", width=150, minwidth=110, stretch=False)
+        self.banks_tree.column("address", width=390, minwidth=180, stretch=True)
         self.banks_tree.grid(row=0, column=0, sticky="nsew")
         self.banks_tree.bind("<Double-Button-1>", self.open_details_for_selected)
         self.banks_tree.bind("<Button-3>", self.show_context_menu)
@@ -1878,31 +1920,38 @@ class BanksWindow:
             messagebox.showerror("База банков", str(exc), parent=self.window)
             return
 
+        if not self.current_results:
+            self.banks_tree.insert(
+                "",
+                tk.END,
+                iid="empty",
+                values=("Банки не найдены", "", "", ""),
+            )
+            return
+
         for bank in self.current_results:
             self.banks_tree.insert(
                 "",
                 tk.END,
                 iid=str(bank["id"]),
-                values=(self.format_bank_row(bank),),
+                values=(
+                    bank.get("name", ""),
+                    bank.get("inn", ""),
+                    bank.get("ogrn", ""),
+                    bank.get("address", ""),
+                ),
             )
-
-    def format_bank_row(self, bank):
-        return " | ".join((
-            bank.get("name", ""),
-            bank.get("inn", ""),
-            bank.get("ogrn", ""),
-        ))
 
     def get_selected_bank_id(self):
         selection = self.banks_tree.selection()
-        if not selection:
+        if not selection or selection[0] == "empty":
             return None
 
         return int(selection[0])
 
     def select_row_under_pointer(self, event):
         row_id = self.banks_tree.identify_row(event.y)
-        if row_id:
+        if row_id and row_id != "empty":
             self.banks_tree.selection_set(row_id)
             self.banks_tree.focus(row_id)
             return True
@@ -1969,12 +2018,18 @@ class BanksWindow:
 
     def add_bank_from_dialog(self, data):
         try:
-            add_bank(data)
+            bank_id = add_bank(data)
         except BanksDatabaseError as exc:
             messagebox.showerror("База банков", str(exc), parent=self.window)
             return False
 
+        self.hide_search_placeholder()
+        self.search_var.set("")
         self.refresh_results()
+        tree_id = str(bank_id)
+        if self.banks_tree.exists(tree_id):
+            self.banks_tree.selection_set(tree_id)
+            self.banks_tree.focus(tree_id)
         messagebox.showinfo("База банков", "Банк добавлен.", parent=self.window)
         return True
 
@@ -1999,7 +2054,7 @@ class BanksWindow:
             messagebox.showerror("База банков", "Выберите банк для удаления.", parent=self.window)
             return
 
-        bank_name = self.banks_tree.item(str(bank_id), "values")[0].split(" | ", 1)[0]
+        bank_name = self.banks_tree.item(str(bank_id), "values")[0]
         if not messagebox.askyesno(
             "Удаление банка",
             f"Удалить банк «{bank_name}» из базы данных?",
