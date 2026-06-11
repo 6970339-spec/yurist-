@@ -120,14 +120,31 @@ def normalize_gosuslugi_label(value):
 
 def find_next_gosuslugi_value(lines, labels):
     normalized_labels = {normalize_gosuslugi_label(label) for label in labels}
+    found_value = ""
 
     for index, line in enumerate(lines):
         if normalize_gosuslugi_label(line) in normalized_labels:
             for next_line in lines[index + 1:]:
                 if next_line.strip():
-                    return next_line.strip()
+                    found_value = next_line.strip()
+                    break
 
-    return ""
+    return found_value
+
+
+def find_next_gosuslugi_date(lines, labels):
+    normalized_labels = {normalize_gosuslugi_label(label) for label in labels}
+    found_date = ""
+
+    for index, line in enumerate(lines):
+        if normalize_gosuslugi_label(line) in normalized_labels:
+            for next_line in lines[index + 1:index + 5]:
+                date_match = re.search(r"\b\d{2}\.\d{2}\.\d{4}\b", next_line)
+                if date_match:
+                    found_date = date_match.group(0)
+                    break
+
+    return found_date
 
 
 def find_value_after_label_in_text(text, label, pattern):
@@ -137,6 +154,15 @@ def find_value_after_label_in_text(text, label, pattern):
         flags=re.IGNORECASE,
     )
     return match.group(2) if match else ""
+
+
+def clean_address_component(value, prefixes):
+    result = value.strip()
+
+    for prefix in prefixes:
+        result = re.sub(rf"^\s*{prefix}\s*", "", result, flags=re.IGNORECASE)
+
+    return result.strip(" ,")
 
 
 def parse_gosuslugi_address(address_text):
@@ -154,14 +180,14 @@ def parse_gosuslugi_address(address_text):
 
         if "район" in lower_part or " р-н" in lower_part:
             result.setdefault("district", part)
-        elif any(word in lower_part for word in ("республика", "область", "край", "автоном")):
+        elif any(word in lower_part for word in ("республика", "респ", "область", "край", "автоном")):
             result.setdefault("region", part)
         elif re.search(r"\bг\.?\s+", lower_part) or "город" in lower_part:
-            result.setdefault("city", part)
-        elif any(word in lower_part for word in ("село", "поселок", "посёлок", "деревня", "пгт")) or re.search(r"\b[сдп]\.?\s+", lower_part):
+            result.setdefault("city", clean_address_component(part, (r"г\.?,?", r"город")))
+        elif any(word in lower_part for word in ("село", "поселок", "посёлок", "деревня", "пгт")) or re.search(r"\b[сп]\.?\s+", lower_part):
             result.setdefault("locality", part)
         elif re.search(r"\bул\.?\s+", lower_part) or "улица" in lower_part:
-            result.setdefault("street", part)
+            result.setdefault("street", clean_address_component(part, (r"ул\.?,?", r"улица")))
 
     house_match = re.search(r"(?:\bд\.?|\bдом)\s*([\wА-Яа-яёЁ/-]+)", text, flags=re.IGNORECASE)
     if house_match:
@@ -179,11 +205,14 @@ def parse_gosuslugi_address(address_text):
 
 
 def collect_gosuslugi_address_text(lines):
-    address_labels = {"адресрегистрации", "адрес", "регистрация"}
+    address_labels = {"адреспостояннойрегистрации", "адресрегистрации", "адрес", "регистрация"}
     stop_labels = {
-        "паспорт", "выдан", "кодподразделения", "датавыдачи", "снилс", "инн",
-        "фамилия", "имя", "отчество", "датарождения", "месторождения",
+        "паспорт", "паспортрф", "серияиномерпаспорта", "выдан", "кодподразделения",
+        "датавыдачи", "снилс", "инн", "фамилия", "имя", "отчество", "фио",
+        "пол", "датарождения", "гражданство", "месторождения",
     }
+
+    found_address = ""
 
     for index, line in enumerate(lines):
         normalized = normalize_gosuslugi_label(line)
@@ -195,25 +224,61 @@ def collect_gosuslugi_address_text(lines):
                     break
                 if next_line.strip():
                     address_lines.append(next_line.strip())
-            return " ".join(address_lines)
+            if address_lines:
+                found_address = " ".join(address_lines)
 
-    return ""
+    return found_address
+
+
+def parse_fio_from_line(line):
+    if normalize_gosuslugi_label(line) in {
+        "паспорт", "паспортрф", "снилс", "инн", "адрес", "адреспостояннойрегистрации",
+        "пол", "датарождения", "гражданство", "месторождения",
+    }:
+        return {}
+
+    parts = line.strip().split()
+    if len(parts) != 3:
+        return {}
+
+    if not all(re.match(r"^[А-ЯЁа-яё-]+$", part) for part in parts):
+        return {}
+
+    return {
+        "surname": parts[0],
+        "name": parts[1],
+        "patronymic": parts[2],
+    }
+
+
+def parse_fio_from_lines(lines):
+    for line in lines:
+        parsed_fio = parse_fio_from_line(line)
+        if parsed_fio:
+            return parsed_fio
+
+    return {}
 
 
 def parse_gosuslugi_text(text):
     result = {}
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    passport_value = find_next_gosuslugi_value(lines, ["Паспорт"])
+    result.update(parse_fio_from_lines(lines))
+
+    passport_value = find_next_gosuslugi_value(
+        lines,
+        ["Паспорт", "Паспорт РФ", "Серия и номер паспорта"],
+    )
     passport_digits = only_digits(passport_value)
     if len(passport_digits) >= 10:
         result["passport_series"] = passport_digits[:4]
         result["passport_number"] = passport_digits[4:10]
     else:
-        passport_match = re.search(r"\b(\d{4})\s+(\d{6})\b", text)
-        if passport_match:
-            result["passport_series"] = passport_match.group(1)
-            result["passport_number"] = passport_match.group(2)
+        passport_matches = re.findall(r"\b(\d{4})\s+(\d{6})\b", text)
+        if passport_matches:
+            result["passport_series"] = passport_matches[-1][0]
+            result["passport_number"] = passport_matches[-1][1]
 
     passport_issued_by = find_next_gosuslugi_value(lines, ["Выдан", "Кем выдан"])
     if passport_issued_by:
@@ -223,7 +288,7 @@ def parse_gosuslugi_text(text):
     if passport_code:
         result["passport_code"] = normalize_passport_code(passport_code)
 
-    passport_issue_date = find_next_gosuslugi_value(lines, ["Дата выдачи"])
+    passport_issue_date = find_next_gosuslugi_date(lines, ["Дата выдачи"])
     if passport_issue_date:
         result["passport_issue_date"] = passport_issue_date
 
@@ -237,12 +302,20 @@ def parse_gosuslugi_text(text):
     if len(inn_digits) >= 12:
         result["inn"] = inn_digits[:12]
 
-    for labels, key in ((["Фамилия"], "surname"), (["Имя"], "name"), (["Отчество"], "patronymic")):
+    for labels, key in ((["Фамилия"], "surname"), (["Имя"], "name"), (["Отчество"], "patronymic"), (["ФИО"], "fio")):
         value = find_next_gosuslugi_value(lines, labels)
-        if value:
+        if not value:
+            continue
+        if key == "fio":
+            fio_parts = value.split()
+            if len(fio_parts) >= 3:
+                result["surname"] = fio_parts[0]
+                result["name"] = fio_parts[1]
+                result["patronymic"] = fio_parts[2]
+        else:
             result[key] = value
 
-    birth_date = find_next_gosuslugi_value(lines, ["Дата рождения"])
+    birth_date = find_next_gosuslugi_date(lines, ["Дата рождения"])
     if birth_date:
         result["birth_date"] = birth_date
 
@@ -255,6 +328,7 @@ def parse_gosuslugi_text(text):
         result.update(parse_gosuslugi_address(address_text))
 
     return result
+
 
 
 def load_clients():
@@ -1432,14 +1506,40 @@ class GosuslugiImportDialog:
             )
             return
 
-        field_names = {
-            key: label
-            for label, key in fields
-        }
-        found_text = ", ".join(field_names.get(key, key) for key in found_fields)
+        groups = []
+        if any(key in found_fields for key in ("surname", "name", "patronymic")):
+            groups.append("ФИО")
+        if any(key in found_fields for key in (
+            "passport_series",
+            "passport_number",
+            "passport_issued_by",
+            "passport_code",
+            "passport_issue_date",
+        )):
+            groups.append("паспорт")
+        if "snils" in found_fields:
+            groups.append("СНИЛС")
+        if "inn" in found_fields:
+            groups.append("ИНН")
+        if any(key in found_fields for key in (
+            "postal_code",
+            "region",
+            "district",
+            "city",
+            "locality",
+            "street",
+            "house",
+            "building",
+            "apartment",
+        )):
+            groups.append("адрес")
+        if any(key in found_fields for key in ("birth_date", "birth_place")):
+            groups.append("рождение")
+
+        found_text = ", ".join(groups) if groups else ", ".join(found_fields)
         messagebox.showinfo(
             "Госуслуги",
-            f"Найдено и заполнено: {found_text}",
+            f"Данные с Госуслуг заполнены: {found_text}",
             parent=self.window,
         )
         self.window.destroy()
