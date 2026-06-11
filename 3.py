@@ -260,75 +260,113 @@ def parse_fio_from_lines(lines):
     return {}
 
 
+def prefer_gosuslugi_value(result, key, value):
+    value = str(value).strip() if value is not None else ""
+    if not value:
+        return
+
+    current_value = result.get(key, "")
+    if not current_value or len(value) >= len(str(current_value)):
+        result[key] = value
+
+
+def split_passport_series_number(value):
+    digits = only_digits(value)
+    if len(digits) < 10:
+        return "", ""
+    return digits[:4], digits[4:10]
+
+
 def parse_gosuslugi_text(text):
     result = {}
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    result.update(parse_fio_from_lines(lines))
+    for line in lines:
+        parsed_fio = parse_fio_from_line(line)
+        for key, value in parsed_fio.items():
+            prefer_gosuslugi_value(result, key, value)
+
+    for labels, key in ((["Фамилия"], "surname"), (["Имя"], "name"), (["Отчество"], "patronymic")):
+        value = find_next_gosuslugi_value(lines, labels)
+        prefer_gosuslugi_value(result, key, value)
+
+    fio_value = find_next_gosuslugi_value(lines, ["ФИО"])
+    if fio_value:
+        fio_parts = fio_value.split()
+        if len(fio_parts) >= 3:
+            prefer_gosuslugi_value(result, "surname", fio_parts[0])
+            prefer_gosuslugi_value(result, "name", fio_parts[1])
+            prefer_gosuslugi_value(result, "patronymic", fio_parts[2])
 
     passport_value = find_next_gosuslugi_value(
         lines,
         ["Паспорт", "Паспорт РФ", "Серия и номер паспорта"],
     )
-    passport_digits = only_digits(passport_value)
-    if len(passport_digits) >= 10:
-        result["passport_series"] = passport_digits[:4]
-        result["passport_number"] = passport_digits[4:10]
-    else:
-        passport_matches = re.findall(r"\b(\d{4})\s+(\d{6})\b", text)
-        if passport_matches:
-            result["passport_series"] = passport_matches[-1][0]
-            result["passport_number"] = passport_matches[-1][1]
+    passport_series, passport_number = split_passport_series_number(passport_value)
+    if passport_series and passport_number:
+        prefer_gosuslugi_value(result, "passport_series", passport_series)
+        prefer_gosuslugi_value(result, "passport_number", passport_number)
+
+    for passport_series, passport_number in re.findall(r"\b(\d{4})\s+(\d{6})\b", text):
+        prefer_gosuslugi_value(result, "passport_series", passport_series)
+        prefer_gosuslugi_value(result, "passport_number", passport_number)
 
     passport_issued_by = find_next_gosuslugi_value(lines, ["Выдан", "Кем выдан"])
-    if passport_issued_by:
-        result["passport_issued_by"] = passport_issued_by
+    prefer_gosuslugi_value(result, "passport_issued_by", passport_issued_by)
 
     passport_code = find_next_gosuslugi_value(lines, ["Код подразделения"])
-    if passport_code:
-        result["passport_code"] = normalize_passport_code(passport_code)
+    passport_code_match = re.search(r"\b\d{3}-?\d{3}\b", passport_code or "")
+    if passport_code_match:
+        prefer_gosuslugi_value(result, "passport_code", normalize_passport_code(passport_code_match.group(0)))
+    else:
+        code_from_text = find_value_after_label_in_text(text, "Код подразделения", r"\d{3}-?\d{3}")
+        if code_from_text:
+            prefer_gosuslugi_value(result, "passport_code", normalize_passport_code(code_from_text))
 
     passport_issue_date = find_next_gosuslugi_date(lines, ["Дата выдачи"])
-    if passport_issue_date:
-        result["passport_issue_date"] = passport_issue_date
+    prefer_gosuslugi_value(result, "passport_issue_date", passport_issue_date)
 
     snils_text = find_next_gosuslugi_value(lines, ["СНИЛС"])
-    snils_digits = only_digits(snils_text) or only_digits(find_value_after_label_in_text(text, "СНИЛС", r"\d{3}[-\s]?\d{3}[-\s]?\d{3}\s?\d{2}"))
-    if len(snils_digits) >= 11:
-        result["snils"] = snils_digits[:11]
+    snils_candidates = []
+    if snils_text:
+        snils_candidates.append(snils_text)
+    snils_candidates.extend(re.findall(r"\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\s?\d{2}\b", text))
+    for snils_candidate in snils_candidates:
+        snils_digits = only_digits(snils_candidate)
+        if len(snils_digits) >= 11:
+            prefer_gosuslugi_value(result, "snils", snils_digits[:11])
 
     inn_text = find_next_gosuslugi_value(lines, ["ИНН"])
-    inn_digits = only_digits(inn_text) or only_digits(find_value_after_label_in_text(text, "ИНН", r"\d{12}"))
-    if len(inn_digits) >= 12:
-        result["inn"] = inn_digits[:12]
-
-    for labels, key in ((["Фамилия"], "surname"), (["Имя"], "name"), (["Отчество"], "patronymic"), (["ФИО"], "fio")):
-        value = find_next_gosuslugi_value(lines, labels)
-        if not value:
-            continue
-        if key == "fio":
-            fio_parts = value.split()
-            if len(fio_parts) >= 3:
-                result["surname"] = fio_parts[0]
-                result["name"] = fio_parts[1]
-                result["patronymic"] = fio_parts[2]
-        else:
-            result[key] = value
+    inn_candidates = []
+    if inn_text:
+        inn_candidates.append(inn_text)
+    inn_after_label = find_value_after_label_in_text(text, "ИНН", r"\d{12}")
+    if inn_after_label:
+        inn_candidates.append(inn_after_label)
+    inn_candidates.extend(re.findall(r"\b\d{12}\b", text))
+    for inn_candidate in inn_candidates:
+        inn_digits = only_digits(inn_candidate)
+        if len(inn_digits) >= 12:
+            prefer_gosuslugi_value(result, "inn", inn_digits[:12])
 
     birth_date = find_next_gosuslugi_date(lines, ["Дата рождения"])
-    if birth_date:
-        result["birth_date"] = birth_date
+    prefer_gosuslugi_value(result, "birth_date", birth_date)
 
     birth_place = find_next_gosuslugi_value(lines, ["Место рождения"])
-    if birth_place:
-        result["birth_place"] = birth_place
+    prefer_gosuslugi_value(result, "birth_place", birth_place)
 
+    address_texts = []
     address_text = collect_gosuslugi_address_text(lines)
     if address_text:
-        result.update(parse_gosuslugi_address(address_text))
+        address_texts.append(address_text)
+    address_texts.extend(re.findall(r"\b\d{6}\s*,[^\n\r]+", text))
+
+    for address_text in address_texts:
+        address_data = parse_gosuslugi_address(address_text)
+        for key, value in address_data.items():
+            prefer_gosuslugi_value(result, key, value)
 
     return result
-
 
 
 def load_clients():
@@ -1481,15 +1519,19 @@ class GosuslugiImportDialog:
         self.parent = parent
         self.on_import = on_import
         self.blocks_count = 0
+        self.last_clipboard_text = ""
+        self.clipboard_after_id = None
 
         self.window = tk.Toplevel(parent)
         self.window.title("Госуслуги")
-        self.window.geometry("420x320")
-        self.window.minsize(380, 280)
+        self.window.geometry("380x280")
+        self.window.minsize(360, 260)
         self.window.transient(parent)
         self.window.attributes("-topmost", True)
 
         self.create_ui()
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.schedule_clipboard_check()
 
     def create_ui(self):
         frame = ttk.Frame(self.window, padding=10)
@@ -1504,12 +1546,12 @@ class GosuslugiImportDialog:
             font=FONT,
             anchor="w",
             justify="left",
-            wraplength=390,
+            wraplength=350,
             fg="blue",
         )
         status_label.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
 
-        self.text = tk.Text(frame, height=9, font=FONT, wrap="word")
+        self.text = tk.Text(frame, height=7, font=FONT, wrap="word")
         self.text.grid(row=1, column=0, sticky="nsew")
 
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
@@ -1553,7 +1595,7 @@ class GosuslugiImportDialog:
             buttons_frame,
             text="Закрыть",
             font=FONT,
-            command=self.window.destroy,
+            command=self.close,
         ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
     def get_clipboard_text(self):
@@ -1564,12 +1606,20 @@ class GosuslugiImportDialog:
 
         return text if isinstance(text, str) else ""
 
-    def paste_from_clipboard(self):
-        text = self.get_clipboard_text().strip()
-        if not text:
-            self.status_var.set("Буфер обмена пуст")
-            return False
+    def schedule_clipboard_check(self):
+        self.clipboard_after_id = self.window.after(900, self.check_clipboard)
 
+    def check_clipboard(self):
+        try:
+            text = self.get_clipboard_text().strip()
+            if text and text != self.last_clipboard_text:
+                self.append_text_block(text)
+                self.last_clipboard_text = text
+        finally:
+            if self.window.winfo_exists():
+                self.schedule_clipboard_check()
+
+    def append_text_block(self, text):
         existing_text = self.text.get("1.0", tk.END).strip()
         if existing_text:
             self.text.insert(tk.END, self.BLOCK_SEPARATOR)
@@ -1580,10 +1630,32 @@ class GosuslugiImportDialog:
         self.status_var.set(f"Добавлено блоков: {self.blocks_count}")
         return True
 
+    def paste_from_clipboard(self):
+        text = self.get_clipboard_text().strip()
+        if not text:
+            self.status_var.set("Буфер обмена пуст")
+            return False
+        if text == self.last_clipboard_text:
+            self.status_var.set("Этот блок уже добавлен")
+            return False
+
+        self.append_text_block(text)
+        self.last_clipboard_text = text
+        return True
+
     def clear_text(self):
         self.text.delete("1.0", tk.END)
         self.blocks_count = 0
-        self.status_var.set("")
+        self.last_clipboard_text = self.get_clipboard_text().strip()
+        self.status_var.set("Очищено")
+
+    def close(self):
+        if self.clipboard_after_id:
+            try:
+                self.window.after_cancel(self.clipboard_after_id)
+            except tk.TclError:
+                pass
+        self.window.destroy()
 
     def show_main_window(self):
         self.parent.lift()
@@ -1633,7 +1705,7 @@ class GosuslugiImportDialog:
             groups.append("рождение")
 
         found_text = ", ".join(groups) if groups else ", ".join(found_fields)
-        self.status_var.set(f"Данные разобраны: {found_text}")
+        self.status_var.set(f"Найдено: {found_text}")
         self.show_main_window()
 
 
