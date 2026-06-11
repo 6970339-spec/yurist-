@@ -517,10 +517,16 @@ def to_genitive_word(word):
     if not word:
         return ""
 
-    parsed = morph.parse(word)[0]
-    genitive = parsed.inflect({"gent"})
+    try:
+        parsed = morph.parse(word)[0]
+        genitive = parsed.inflect({"gent"})
+    except Exception:
+        return word
 
-    return genitive.word.capitalize() if genitive else word
+    if genitive and genitive.word:
+        return genitive.word.capitalize()
+
+    return word
 
 
 def fio_to_genitive(surname, name, patronymic):
@@ -884,6 +890,16 @@ class YuristApp:
             command=self.save_client_to_base,
             width=30
         ).grid(row=row, column=0, columnspan=3, pady=10)
+
+        row += 1
+
+        tk.Button(
+            frame,
+            text="Очистить форму",
+            font=FONT,
+            command=self.clear_form,
+            width=30
+        ).grid(row=row, column=0, columnspan=3, pady=5)
 
         row += 1
 
@@ -1315,6 +1331,25 @@ class YuristApp:
         self.creditors = data.get("creditors", [])
         self.refresh_creditors_table()
 
+    def clear_form(self):
+        if not messagebox.askyesno("Очистка формы", "Очистить все введённые данные?"):
+            return
+
+        for entry in self.entries.values():
+            entry.delete(0, tk.END)
+            entry.configure(bg=BG_OK)
+
+        self.client_combo.set("")
+        self.creditors = []
+        self.refresh_creditors_table()
+        self.current_code_results = []
+        self.code_results_box.delete(0, tk.END)
+        self.last_postal_code_lookup = ""
+
+        if self.postal_code_after_id:
+            self.root.after_cancel(self.postal_code_after_id)
+            self.postal_code_after_id = None
+
     def refresh_clients_list(self):
         self.clients = load_clients()
 
@@ -1477,6 +1512,22 @@ class GosuslugiImportDialog:
 
         tk.Button(
             buttons_frame,
+            text="Вставить из буфера обмена",
+            font=FONT,
+            command=self.paste_from_clipboard,
+            width=24,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
+            text="Вставить и разобрать",
+            font=FONT,
+            command=self.paste_and_parse,
+            width=20,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
             text="Разобрать и заполнить",
             font=FONT,
             command=self.parse_and_fill,
@@ -1490,6 +1541,28 @@ class GosuslugiImportDialog:
             command=self.window.destroy,
             width=14,
         ).pack(side="left")
+
+    def get_clipboard_text(self):
+        try:
+            text = self.window.clipboard_get()
+        except tk.TclError:
+            return ""
+
+        return text if isinstance(text, str) else ""
+
+    def paste_from_clipboard(self):
+        text = self.get_clipboard_text().strip()
+        if not text:
+            messagebox.showinfo("Госуслуги", "В буфере обмена нет текста.", parent=self.window)
+            return False
+
+        self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", text)
+        return True
+
+    def paste_and_parse(self):
+        if self.paste_from_clipboard():
+            self.parse_and_fill()
 
     def parse_and_fill(self):
         text = self.text.get("1.0", tk.END).strip()
