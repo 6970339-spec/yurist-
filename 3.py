@@ -1475,6 +1475,8 @@ class YuristApp:
 
 
 class GosuslugiImportDialog:
+    BLOCK_SEPARATOR = "\n\n----- НОВЫЙ БЛОК -----\n\n"
+
     def __init__(self, parent, on_import):
         self.parent = parent
         self.on_import = on_import
@@ -1484,7 +1486,7 @@ class GosuslugiImportDialog:
         self.window.geometry("760x560")
         self.window.minsize(620, 420)
         self.window.transient(parent)
-        self.window.grab_set()
+        self.window.attributes("-topmost", True)
 
         self.create_ui()
 
@@ -1496,7 +1498,7 @@ class GosuslugiImportDialog:
 
         tk.Label(
             frame,
-            text="Вставьте скопированный блок данных с Госуслуг:",
+            text="Вставляйте сюда несколько блоков данных с Госуслуг:",
             font=FONT,
         ).grid(row=0, column=0, sticky="w", pady=(0, 6))
 
@@ -1507,39 +1509,57 @@ class GosuslugiImportDialog:
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.text.configure(yscrollcommand=scrollbar.set)
 
+        self.status_var = tk.StringVar(value="")
+        status_label = tk.Label(
+            frame,
+            textvariable=self.status_var,
+            font=FONT,
+            anchor="w",
+            fg="blue",
+        )
+        status_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
         buttons_frame = ttk.Frame(frame)
-        buttons_frame.grid(row=2, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons_frame.grid(row=3, column=0, columnspan=2, sticky="e", pady=(10, 0))
 
         tk.Button(
             buttons_frame,
-            text="Вставить из буфера обмена",
+            text="Вставить из буфера",
             font=FONT,
             command=self.paste_from_clipboard,
-            width=24,
-        ).pack(side="left", padx=(0, 8))
-
-        tk.Button(
-            buttons_frame,
-            text="Вставить и разобрать",
-            font=FONT,
-            command=self.paste_and_parse,
             width=20,
         ).pack(side="left", padx=(0, 8))
 
         tk.Button(
             buttons_frame,
-            text="Разобрать и заполнить",
+            text="Разобрать",
             font=FONT,
             command=self.parse_and_fill,
+            width=12,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
+            text="Очистить",
+            font=FONT,
+            command=self.clear_text,
+            width=12,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            buttons_frame,
+            text="Открыть основное окно",
+            font=FONT,
+            command=self.show_main_window,
             width=22,
         ).pack(side="left", padx=(0, 8))
 
         tk.Button(
             buttons_frame,
-            text="Отмена",
+            text="Закрыть",
             font=FONT,
             command=self.window.destroy,
-            width=14,
+            width=10,
         ).pack(side="left")
 
     def get_clipboard_text(self):
@@ -1553,30 +1573,37 @@ class GosuslugiImportDialog:
     def paste_from_clipboard(self):
         text = self.get_clipboard_text().strip()
         if not text:
-            messagebox.showinfo("Госуслуги", "В буфере обмена нет текста.", parent=self.window)
+            self.status_var.set("Буфер обмена пуст")
             return False
 
-        self.text.delete("1.0", tk.END)
-        self.text.insert("1.0", text)
+        existing_text = self.text.get("1.0", tk.END).strip()
+        if existing_text:
+            self.text.insert(tk.END, self.BLOCK_SEPARATOR)
+
+        self.text.insert(tk.END, text)
+        self.text.see(tk.END)
+        self.status_var.set("Текст добавлен из буфера")
         return True
 
-    def paste_and_parse(self):
-        if self.paste_from_clipboard():
-            self.parse_and_fill()
+    def clear_text(self):
+        self.text.delete("1.0", tk.END)
+        self.status_var.set("")
+
+    def show_main_window(self):
+        self.parent.lift()
+        self.parent.focus_force()
+        self.parent.attributes("-topmost", True)
+        self.parent.after(700, lambda: self.parent.attributes("-topmost", False))
 
     def parse_and_fill(self):
         text = self.text.get("1.0", tk.END).strip()
         if not text:
-            messagebox.showerror("Госуслуги", "Вставьте текст с Госуслуг.", parent=self.window)
+            self.status_var.set("Нет текста для разбора")
             return
 
         found_fields = self.on_import(text)
         if not found_fields:
-            messagebox.showinfo(
-                "Госуслуги",
-                "Не удалось найти данные для заполнения.",
-                parent=self.window,
-            )
+            self.status_var.set("Не удалось найти данные для заполнения")
             return
 
         groups = []
@@ -1610,12 +1637,8 @@ class GosuslugiImportDialog:
             groups.append("рождение")
 
         found_text = ", ".join(groups) if groups else ", ".join(found_fields)
-        messagebox.showinfo(
-            "Госуслуги",
-            f"Данные с Госуслуг заполнены: {found_text}",
-            parent=self.window,
-        )
-        self.window.destroy()
+        self.status_var.set(f"Данные разобраны: {found_text}")
+        self.show_main_window()
 
 
 class AddressSelectionDialog:
